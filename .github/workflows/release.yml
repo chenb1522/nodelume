@@ -1,0 +1,54 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test and validate
+        run: |
+          go test ./...
+          go vet ./...
+          go test -race ./server ./agent
+          sh -n scripts/*.sh
+          node --check server/web/app.js
+      - name: Build static Linux binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "invalid release tag: $VERSION" >&2; exit 1; }
+          V="${VERSION#v}"
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.serverVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-server-linux-$ARCH" ./server
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.agentVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-agent-linux-$ARCH" ./agent
+          done
+          cp release.pub dist/release.pub
+          cp scripts/*.sh dist/
+          cat > dist/release-manifest.json <<JSON
+          {"version":"$V","protocol":1,"min_agent":"1.0.0","min_server":"1.0.0"}
+          JSON
+      - name: Checksums and Ed25519 signature
+        env:
+          NODELUME_SIGNING_PRIVATE_KEY: ${{ secrets.NODELUME_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -eu
+          cd dist
+          sha256sum nodelume-server-linux-* nodelume-agent-linux-* release.pub release-manifest.json *.sh > checksums.txt
+          cd ..
+          NODELUME_RELEASE_PUBLIC_KEY="$(cat release.pub)" go run ./tools/sign dist/checksums.txt dist/checksums.sig
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* --title "NodeLume ${{ github.ref_name }}" --generate-notes

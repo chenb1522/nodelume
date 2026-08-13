@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>NodeLume · Lightweight Server Monitoring</title>
+<link rel="icon" href="/assets/logo.webp">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+
+<div class="overlay" id="setupOverlay">
+  <div class="auth-card">
+    <div class="auth-brand"><div class="logo" aria-hidden="true"></div><strong><span style="color:var(--text)">Node</span><span style="color:var(--green)">Lume</span></strong><span class="tag">首次初始化</span></div>
+    <div class="auth-title">设置管理员密码</div>
+    <div class="auth-sub">首次访问需要初始化管理员密码。正式版仅保存密码哈希，不保存明文密码。</div>
+    <div class="form">
+      <div class="field"><label>管理员密码</label><input id="setupPass" type="password"></div>
+      <div class="field"><label>确认密码</label><input id="setupPass2" type="password"></div>
+      
+      <button class="btn primary" id="setupBtn" style="margin-top:2px">初始化并进入</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="loginOverlay">
+  <div class="auth-card">
+    <div class="auth-brand"><div class="logo" aria-hidden="true"></div><strong><span style="color:var(--text)">Node</span><span style="color:var(--green)">Lume</span></strong></div>
+    <div class="auth-title">管理员登录</div>
+    <div class="auth-sub">安全入口：<code id="loginPathText">/a7k3m9</code></div>
+    <div class="form">
+      <div class="field"><label>密码</label><input id="loginPass" type="password" placeholder="输入密码"></div>
+      
+      <div class="locked" id="loginError"></div>
+      <button class="btn primary" id="loginBtn">登录</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="app">
+  <header class="topbar">
+    <div class="brand"><div class="logo" aria-hidden="true"></div><span class="brandname"><span class="node">Node</span><span class="lume">Lume</span></span><span class="tag" id="versionTag">v1.0.0</span></div>
+    <div class="actions">
+      <button class="btn iconbtn top-theme" id="themeBtn" title="切换主题">☾</button>
+      <button class="btn top-settings" id="settingsBtn">设置</button>
+      <button class="btn top-logout" id="logoutBtn" title="退出登录" aria-label="退出登录">
+        <span class="logout-text">退出</span>
+        <svg class="logout-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10 5H6.8A1.8 1.8 0 0 0 5 6.8v10.4A1.8 1.8 0 0 0 6.8 19H10M14 8l4 4-4 4M18 12H9"
+                fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button class="btn primary top-add" id="addBtn">＋ 添加服务器</button>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div><h1>服务器状态</h1><p>轻量多节点 Linux 监控 · 最近 1 小时历史数据 · 安全优先</p></div>
+    <div class="live hide-mobile"><span class="dot"></span><span>数据实时更新中</span></div>
+  </section>
+
+  <section class="summary">
+    <div class="stat"><div class="label">服务器</div><div class="value" id="totalServers">0</div><div class="sub">多发行版节点</div></div>
+    <div class="stat"><div class="label">在线</div><div class="value" id="onlineServers">0</div><div class="sub">当前连接正常</div></div>
+    <div class="stat"><div class="label">离线</div><div class="value" id="offlineServers">0</div><div class="sub">超过 30 秒无心跳</div></div>
+    <div class="stat"><div class="label">版本状态</div><div class="value" id="updateSummary" style="font-size:22px">--</div><div class="sub" id="updateSummarySub">正在检查版本状态</div></div>
+  </section>
+
+  <div class="toolbar">
+    <div class="toolbar-title"><h2>节点</h2><button class="btn primary mobile-add" id="mobileAddBtn">＋ 添加</button></div>
+    <div class="filters"><input class="search" id="searchInput" placeholder="搜索服务器..."><button class="btn" id="refreshBtn">刷新</button></div>
+  </div>
+
+  <main class="server-grid" id="serverGrid"></main>
+</div>
+
+<div class="overlay" id="addOverlay">
+  <div class="modal">
+    <div class="modal-head"><h3>添加服务器</h3><button class="close" data-close="addOverlay">✕</button></div>
+    <div id="addStep1">
+      <div class="form">
+        <div class="field"><label>服务器名称</label><input id="nodeName" placeholder="例如：香港 HK01"></div>
+        <div class="field"><label>分组</label><select id="nodeGroup"><option>默认</option><option>生产环境</option><option>测试环境</option></select></div>
+        <div class="note safe">Agent 主动出站连接，不需要开放监控端口。接入 Token 30 分钟有效且只能使用一次。</div>
+      </div>
+      <div class="modal-actions"><button class="btn" data-close="addOverlay">取消</button><button class="btn primary" id="createNodeBtn">创建服务器</button></div>
+    </div>
+    <div id="addStep2" style="display:none">
+      <div style="margin-top:16px;font-size:13px;color:var(--muted)">在目标 VPS 中以 root 执行：</div>
+      <div class="command-box"><code id="installCommand"></code><button class="copy" id="copyCommand">复制</button></div>
+      <div class="note" style="margin-top:10px">安装脚本自动识别 amd64 / arm64、Debian / Ubuntu / CentOS / AlmaLinux / Rocky Linux，并安装静态单二进制 Agent。</div>
+      <div class="waiting"><span class="spinner"></span><span id="waitingText">等待 Agent 连接...</span></div>
+      <div class="modal-actions"><button class="btn" id="resetAddBtn">返回</button><button class="btn primary" data-close="addOverlay">完成</button></div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="detailOverlay">
+  <div class="modal wide">
+    <div class="modal-head"><div></div><button class="close" data-close="detailOverlay">✕</button></div>
+    <div class="detail-top">
+      <div class="detail-id"><div class="bigflag" id="dFlag">◈</div><div><h2 id="dName">服务器</h2><div class="meta" id="dMeta">--</div></div></div>
+      <div class="status" id="detailStatus"><span class="sdot" id="detailStatusDot"></span><span id="detailStatusText">--</span></div>
+    </div>
+    <div class="note warn" id="offlineBanner" style="display:none;margin-top:12px">节点当前离线。只显示最后一次缓存的概览信息；CPU / 内存 / 磁盘实时详情、进程控制和已停止项目在节点重新连接前不可用。</div>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="overview">概览</button>
+      <button class="tab" data-tab="cpu">CPU</button>
+      <button class="tab" data-tab="memory">内存</button>
+      <button class="tab" data-tab="disk">磁盘</button>
+      <button class="tab" data-tab="process">进程</button>
+      <button class="tab" data-tab="stopped">已停止</button>
+      <button class="tab" data-tab="system">系统</button>
+    </div>
+
+    <div class="tabpane active" id="pane-overview">
+      <div class="detail-summary">
+        <div class="mini"><div class="l">CPU</div><div class="v" id="dcpu">--</div><div class="bar"><div class="fill" id="dcpuBar" style="width:0"></div></div></div>
+        <div class="mini"><div class="l">内存</div><div class="v" id="dram">--</div><div class="bar"><div class="fill" id="dramBar" style="width:0"></div></div></div>
+        <div class="mini"><div class="l">磁盘</div><div class="v" id="ddisk">--</div><div class="bar"><div class="fill" id="ddiskBar" style="width:0"></div></div></div>
+        <div class="mini"><div class="l">温度</div><div class="v" id="dtemp">--</div><div class="bar"><div class="fill" style="width:0"></div></div></div>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle"><span>CPU 使用率</span><div class="ranges" data-chart="overviewChart"><button class="range active" data-range="1">1 分钟</button><button class="range" data-range="5">5 分钟</button><button class="range" data-range="10">10 分钟</button><button class="range" data-range="30">30 分钟</button><button class="range" data-range="60">1 小时</button></div></div>
+        <canvas id="overviewChart"></canvas>
+      </div>
+      <div class="info-grid" style="margin-top:12px">
+        <div class="info"><span>网络</span><b id="dnet">--</b></div>
+        <div class="info"><span>负载</span><b id="dload">--</b></div>
+        <div class="info"><span>运行时间</span><b id="duptime">--</b></div>
+        <div class="info"><span>进程数</span><b id="procCount">--</b></div>
+      </div>
+    </div>
+
+    <div class="tabpane" id="pane-cpu">
+      <div class="info-grid">
+        <div class="info"><span>CPU 型号</span><b id="cpuModel">--</b></div>
+        <div class="info"><span>核心</span><b id="cpuCores">--</b></div>
+        <div class="info"><span>当前使用率</span><b id="cpuNow">--</b></div>
+        <div class="info"><span>Load Average</span><b id="cpuLoad">--</b></div>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle"><span>CPU 使用率</span><div class="ranges" data-chart="cpuChart"><button class="range active" data-range="1">1 分钟</button><button class="range" data-range="5">5 分钟</button><button class="range" data-range="10">10 分钟</button><button class="range" data-range="30">30 分钟</button><button class="range" data-range="60">1 小时</button></div></div>
+        <canvas id="cpuChart"></canvas>
+      </div>
+      <h4>CPU 占用前 10</h4><div id="cpuProcTable"></div>
+    </div>
+
+    <div class="tabpane" id="pane-memory">
+      <div class="detail-summary">
+        <div class="mini"><div class="l">总内存</div><div class="v" id="memTotal">--</div></div>
+        <div class="mini"><div class="l">已使用</div><div class="v" id="memUsed">--</div></div>
+        <div class="mini"><div class="l">可用</div><div class="v" id="memAvail">--</div></div>
+        <div class="mini"><div class="l">使用率</div><div class="v" id="memNow">--</div></div>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle"><span>内存使用率</span><div class="ranges" data-chart="memChart"><button class="range active" data-range="1">1 分钟</button><button class="range" data-range="5">5 分钟</button><button class="range" data-range="10">10 分钟</button><button class="range" data-range="30">30 分钟</button><button class="range" data-range="60">1 小时</button></div></div>
+        <canvas id="memChart"></canvas>
+      </div>
+      <h4>内存占用前 10</h4><div id="memProcTable"></div>
+    </div>
+
+    <div class="tabpane" id="pane-disk"><div id="diskTable"><div class="empty">打开页面后读取磁盘信息</div></div></div>
+
+    <div class="tabpane" id="pane-process">
+      <div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:10px"><div class="hint">点击进程查看启动方式、进程树及控制选项</div><input id="procSearch" class="search" placeholder="搜索进程"></div>
+      <div id="allProcTable"></div>
+    </div>
+
+    <div class="tabpane" id="pane-stopped">
+      <div class="note safe" style="margin-bottom:10px">这里只显示由 NodeLume 主动停止且可安全恢复的项目。systemd 服务通过固定的本地受控启动动作恢复；独立二进制的启动快照只保存在 Agent 本机，不上传原始敏感参数，也绝不通过 Shell 执行。</div>
+      <div id="stoppedProcTable"></div>
+    </div>
+
+    <div class="tabpane" id="pane-system">
+      <div class="info-grid">
+        <div class="info"><span>主机名</span><b id="sysHostname">--</b></div><div class="info"><span>操作系统</span><b id="sysOS">--</b></div>
+        <div class="info"><span>Kernel</span><b id="sysKernel">--</b></div><div class="info"><span>架构</span><b id="sysArch">--</b></div>
+        <div class="info"><span>Agent</span><b id="sysAgent">--</b></div><div class="info"><span>协议</span><b id="sysProtocol">--</b></div>
+        <div class="info"><span>连接</span><b id="sysConnection">Agent 主动出站</b></div><div class="info"><span>最后心跳</span><b id="sysHeartbeat">--</b></div>
+      </div>
+      <div class="setting-section" style="margin-top:12px">
+        <h4>节点连接管理</h4>
+        <div class="note safe">重新接入会生成一次性 Token；现有 Agent 在新的 Agent 成功注册前继续保持有效。</div>
+        <div class="modal-actions"><button class="btn" id="reenrollBtn">重新生成接入命令</button><button class="btn danger" id="deleteNodeBtn">删除节点</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="procOverlay">
+  <div class="modal">
+    <div class="modal-head"><h3 id="pName">进程详情</h3><button class="close" data-close="procOverlay">✕</button></div>
+    <div class="info-grid proc-stats" style="margin-top:16px">
+      <div class="info"><span>PID</span><b id="pPid">--</b></div>
+      <div class="info"><span>状态</span><b id="pState">--</b></div>
+      <div class="info"><span>CPU</span><b id="pCpu">--</b></div><div class="info"><span>内存</span><b id="pMem">--</b></div>
+      <div class="info"><span>用户</span><b id="pUser">--</b></div><div class="info"><span>启动方式</span><b id="pLaunch">--</b></div>
+    </div>
+    <div class="info-grid proc-meta" style="margin-top:10px">
+      <div class="info"><span>Service / Unit</span><b id="pService">--</b></div>
+      <div class="info"><span>父进程</span><b id="pParent">--</b></div>
+      <div class="info"><span>可执行文件</span><b id="pExe">--</b></div>
+      <div class="info"><span>工作目录</span><b id="pCwd">--</b></div>
+    </div>
+    <div class="field" style="margin-top:12px"><label>启动命令（敏感参数会脱敏；只展示，不作为 Shell 执行）</label><div class="command-box"><code id="pCmd"></code></div></div>
+    <div class="field" style="margin-top:12px"><label>进程树</label><div class="proc-tree" id="pTree"></div></div>
+    <div class="note safe">NodeLume 不读取 <code>/proc/&lt;pid&gt;/environ</code>，避免把 API Key、密码、Token 等环境变量上传到中心端。</div>
+    <div class="note warn" id="pNote" style="display:none;margin-top:10px"></div>
+    <div class="modal-actions" id="procActions"></div>
+  </div>
+</div>
+
+<div class="overlay" id="confirmOverlay">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-head"><h3 id="confirmTitle">确认操作</h3><button class="close" data-close="confirmOverlay">✕</button></div>
+    <p id="confirmText" style="line-height:1.7;font-size:14px"></p>
+    <div class="note warn" id="confirmNote"></div>
+    <div class="modal-actions"><button class="btn" data-close="confirmOverlay">取消</button><button class="btn danger" id="confirmActionBtn">确认</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="settingsOverlay">
+  <div class="modal wide">
+    <div class="modal-head"><h3>设置</h3><button class="close" data-close="settingsOverlay">✕</button></div>
+    <div class="setting-layout">
+      <nav class="setting-nav" id="settingNav">
+        <button class="active" data-setting="general">常规</button>
+        <button data-setting="security">安全</button>
+        <button data-setting="https">域名与 HTTPS</button>
+        <button data-setting="updates">系统更新</button>
+        <button data-setting="audit">审计日志</button><button data-setting="about">关于</button>
+      </nav>
+      <div>
+        <section class="setting-pane active" id="setting-general">
+          <div class="setting-section">
+            <h4>系统</h4>
+            <div class="info-grid">
+              <div class="info"><span>Server 版本</span><b id="settingServerVersion">v1.0.0</b></div>
+              <div class="info"><span>Protocol</span><b id="settingProtocol">v1</b></div>
+              <div class="info"><span>历史保存</span><b>1 小时 / 5 秒一个点（重启清空）</b></div>
+              <div class="info"><span>存储方式</span><b>内存环形缓冲区</b></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="setting-pane" id="setting-security">
+          <div class="setting-section">
+            <h4>安全入口</h4>
+            <div class="field"><label>管理入口</label><input id="securePath" value="/a7k3m9"></div>
+            <div class="note" style="margin-top:10px">修改后旧入口返回 404。Agent API 与一次性接入接口使用独立路径，不会因管理入口变化而断开。</div>
+            <div class="modal-actions"><button class="btn primary" id="saveSecurePath">保存入口</button></div>
+          </div>
+          <div class="setting-section">
+            <h4>登录保护</h4>
+            <div class="switchrow"><div><b style="font-size:13px">3 次失败封禁来源 IP</b><div class="hint">封禁只保存在内存，Server 重启后自动解除</div></div><div class="switch on"><i></i></div></div>
+            <div class="field" style="margin-top:12px"><label>可信反向代理 CIDR（可选）</label><input id="trustedProxy" placeholder="例如 127.0.0.1/32"></div>
+            <div class="note warn" style="margin-top:10px">默认只使用 TCP 来源地址。只有请求来自这里配置的可信代理时，才接受 X-Forwarded-For / X-Real-IP，防止伪造客户端 IP。</div>
+            <div class="modal-actions"><button class="btn primary" id="saveProxyBtn">保存代理设置</button></div>
+          </div>
+          <div class="setting-section">
+            <h4>修改管理员密码</h4>
+            <div class="form" style="margin-top:0">
+              <div class="field"><label>当前密码</label><input id="oldPass" type="password"></div>
+              <div class="field"><label>新密码</label><input id="newPass" type="password" placeholder="至少 12 个字符"></div>
+              <div class="field"><label>确认新密码</label><input id="newPass2" type="password"></div>
+            </div>
+            <div class="modal-actions"><button class="btn primary" id="changePassBtn">修改密码</button></div>
+          </div>
+
+          <div class="setting-section">
+            <h4>当前会话</h4>
+            <div class="switchrow">
+              <div><b style="font-size:13px">管理员已登录</b><div class="hint">退出后需要通过当前安全入口重新登录</div></div>
+              <button class="btn danger small" id="settingsLogoutBtn">退出登录</button>
+            </div>
+          </div>
+          <div class="setting-section">
+            <h4>Agent 安全边界</h4>
+            <div class="note safe" style="margin-bottom:10px">监控 Agent 以低权限用户运行；需要停止进程、控制 systemd 或更新时，通过本机 Unix Socket 触发 systemd 按需启动的最小权限 Helper。Helper 不常驻、不开网络端口、没有 Shell 接口。</div>
+            <div class="protocol">ALLOW:
+agent_ping
+agent_self_check
+system_info
+process_list
+process_info
+process_terminate
+process_kill
+process_restart
+process_start_saved
+service_stop
+service_restart
+disk_info
+network_info
+listening_ports
+sensor_info
+agent_upgrade
+
+DENY:
+shell / exec / script / bash / sh / custom_command
+
+TARGET RULE:
+service actions only for process-derived / explicitly approved units
+critical units and NodeLume itself are protected</div>
+          </div>
+        </section>
+
+        <section class="setting-pane" id="setting-https">
+          <div class="setting-section">
+            <h4>域名</h4>
+            <div class="field"><label>监控域名</label><input id="domainInput" placeholder="例如 monitor.example.com"></div>
+            <div class="field" style="margin-top:10px"><label>HTTPS 模式</label><select id="httpsMode"><option value="off">关闭 / 仅内部 HTTP</option><option value="builtin">NodeLume 内置 ACME（80/443）</option><option value="proxy">已有 Nginx / Caddy / 其他反代</option></select></div>
+            <div class="note" style="margin-top:10px">正式启用前需要先把域名解析到当前 Server。内置模式会先检查 80/443 是否冲突，再尝试申请证书；检查失败不会修改现有监听配置。</div>
+            <div class="note warn" style="margin-top:10px">已有 Agent 时修改域名属于连接迁移。正式版会先验证新域名，再逐台下发受限的 endpoint migration，并要求旧域名保持可用直到所有节点迁移完成。</div>
+            <div class="modal-actions"><button class="btn" id="domainCheckBtn">验证配置</button><button class="btn primary" id="domainApplyBtn">应用</button></div>
+          </div>
+          <div class="setting-section" id="acmeSection">
+            <h4>自动 HTTPS</h4>
+            <div class="switchrow"><div><b style="font-size:13px">ACME 自动证书</b><div class="hint">自动申请、缓存和续期证书</div></div><div class="switch on" id="httpsSwitch"><i></i></div></div>
+            <div class="info-grid" style="margin-top:12px">
+              <div class="info"><span>证书状态</span><b id="certStatus">--</b></div>
+              <div class="info"><span>到期时间</span><b id="certExpiry">--</b></div>
+              <div class="info"><span>自动续期</span><b id="certAuto">--</b></div>
+              <div class="info"><span>HTTP-01</span><b id="certHTTP">内置模式使用 80 端口</b></div>
+            </div>
+            <div class="note warn" style="margin-top:10px">HTTP-01 申请/续期要求公网 80 端口能够访问此 Server。若前面已有 Nginx/Caddy，需要避免端口冲突。</div>
+            <div class="modal-actions"><button class="btn" id="certCheckBtn">检查证书</button><button class="btn primary" id="certRenewBtn">检查并续期</button></div>
+          </div>
+        </section>
+
+        <section class="setting-pane" id="setting-updates">
+          <div class="setting-section">
+            <div class="switchrow"><div><h4 style="margin:0">版本更新</h4><div class="hint">Release 源：GitHub Releases · 更新失败自动回滚</div></div><button class="btn" id="checkUpdatesBtn">检查更新</button></div>
+          </div>
+          <div class="update-card">
+            <div class="update-head"><div><div class="update-title">NodeLume Server</div><div class="update-meta" id="serverVersionMeta">当前 v1.0.0 · 正在检查 · Protocol v1</div></div><button class="btn primary small" id="serverUpdateBtn">一键更新</button></div>
+            <div class="progress"><i id="serverUpdateProgress"></i></div>
+            <div class="hint" id="serverUpdateText" style="margin-top:8px">✓ 与当前所有 Agent 兼容，可安全更新</div>
+          </div>
+          <div class="update-card">
+            <div class="update-head"><div><div class="update-title">Agent</div><div class="update-meta" id="agentUpdateMeta">正在检查 Agent 版本</div></div><button class="btn small" id="allAgentUpdateBtn">更新全部</button></div>
+            <div class="tablewrap agent-update-wrap" style="margin-top:10px"><table class="agent-update-table"><thead><tr><th>节点</th><th>当前</th><th>目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="agentUpdateRows"></tbody></table></div>
+          </div>
+          <div class="note safe">更新流程：下载临时文件 → SHA256 → Ed25519 签名 → self-check → 备份旧版本 → 原子切换 → 健康检查。任何阶段失败都会恢复上一版本并重新启动。</div>
+        </section>
+
+        <section class="setting-pane" id="setting-audit">
+          <div class="audit" id="auditList"></div>
+        </section>
+
+        <section class="setting-pane" id="setting-about">
+          <div class="setting-section">
+            <div class="about-brand">
+              <div class="logo" aria-hidden="true"></div>
+              <div>
+                <div class="about-wordmark"><span style="color:var(--text)">Node</span><span style="color:var(--green)">Lume</span></div>
+                <div class="about-tagline">See Every Node Clearly · 让每个节点清晰可见</div>
+              </div>
+            </div>
+            <div class="info-grid">
+              <div class="info"><span>产品</span><b>NodeLume</b></div>
+              <div class="info"><span>版本</span><b>v1.0.0</b></div>
+              <div class="info"><span>Server</span><b>nodelume-server</b></div>
+              <div class="info"><span>Agent</span><b>nodelume-agent</b></div>
+            </div>
+            <div class="note safe" style="margin-top:12px">设计原则：轻量、默认拒绝、最小权限、无远程 Shell、可审计、更新失败自动回滚。</div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast">完成</div>
+
+
+<script src="/assets/app.js" defer></script>
+</body>
+</html>
