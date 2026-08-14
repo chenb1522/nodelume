@@ -21,7 +21,7 @@ jobs:
           go test ./...
           go vet ./...
           go test -race ./server ./agent
-          sh -n scripts/*.sh
+          sh -n scripts/*.sh scripts/nlm
           node --check server/web/app.js
       - name: Build static Linux binaries
         env:
@@ -57,6 +57,7 @@ jobs:
             exit 1
           }
           done
+          sh -n dist/install-server.sh dist/install-agent.sh dist/nlm
           cat > dist/release-manifest.json <<JSON
           {"version":"$V","protocol":1,"min_agent":"1.0.0","min_server":"1.0.0"}
           JSON

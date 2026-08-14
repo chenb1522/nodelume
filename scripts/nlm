@@ -44,7 +44,7 @@ read_status(){ f=$1;k=$2; [ -r "$f" ] && sed -n "s/^$k=//p" "$f" | head -1 || tr
 show_status(){
   detail=0
   while [ $# -gt 0 ]; do case "$1" in -d|--detail)detail=1;shift;;*)err "未知参数: $1";exit 2;;esac;done
-  state=$(systemctl is-active "$svc" 2>/dev/null || true);ver=$($bin --version 2>/dev/null | head -1);pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null || echo 0)
+  state=$(systemctl is-active "$svc" 2>/dev/null || true);ver=$($bin --version 2>/dev/null | head -1);pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | sed -n "s/^MainPID=//p" | head -1)
   printf 'NodeLume %s\n────────────────────────────────\n状态      %s\n版本      %s\nPID       %s\n' "$(printf %s "$kind"|awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "${state:-unknown}" "$ver" "${pid:-0}"
   if [ "$kind" = server ]; then sf=/run/nodelume-server/status.env; printf '监听      %s\n' "$(read_status "$sf" LISTEN)"; else sf=/run/nodelume-agent/status.env;printf '节点      %s\nServer    %s\n间隔      %ss\n' "$(read_status "$sf" NAME)" "$(read_status "$sf" SERVER)" "$(read_status "$sf" INTERVAL)";fi
   [ "$detail" -eq 1 ] || return 0
@@ -81,7 +81,7 @@ case "$cmd" in
  config) [ "$kind" = agent ]||exit 2;exec "$bin" config --config /var/lib/nodelume-agent/agent.json "$@";;
  bind|set) [ "$kind" = agent ]||exit 2;"$bin" "$cmd" --config /var/lib/nodelume-agent/agent.json "$@";rc=$?;[ "$rc" -eq 0 ]&&systemctl restart nodelume-agent 2>/dev/null||true;exit "$rc";;
  reconnect) [ "$kind" = agent ]||exit 2;[ "$(id -u)" -eq 0 ]||{ err '重连需要 root 权限';exit 5;};systemctl restart nodelume-agent;echo '✅ Agent 已重新连接';;
- u|update) if [ "$kind" = agent ];then update_agent "$@";else [ "$(id -u)" -eq 0 ]||{ err '更新需要 root 权限';exit 5;};req=latest;while [ $# -gt 0 ];do case "$1" in -v|--version)req=$2;shift 2;;*)exit 2;;esac;done;tag=$(resolve_version "$req")||{ rc=$?;[ "$rc" -eq 4 ]&&err 'VERSION_NOT_FOUND'||err '无法访问 GitHub Release';exit "$rc";};cur=$($bin --version|sed -n 's/.* v\([0-9][^ ]*\).*/v\1/p'|head -1);cmp=$(vercmp "$cur" "$tag");[ "$cmp" -lt 0 ]||{ [ "$cmp" -eq 0 ]&&{ echo "✅ Server 已是 $tag";exit 0;};err "拒绝降级：当前 $cur，请求 $tag";exit 4;};exec /usr/local/lib/nodelume/install-server.sh -v "$tag";;fi;;
+ u|update) if [ "$kind" = agent ];then update_agent "$@";else [ "$(id -u)" -eq 0 ]||{ err '更新需要 root 权限';exit 5;};req=latest;while [ $# -gt 0 ];do case "$1" in -v|--version)req=$2;shift 2;;*)exit 2;;esac;done;tag=$(resolve_version "$req")||{ rc=$?;[ "$rc" -eq 4 ]&&err 'VERSION_NOT_FOUND'||err '无法访问 GitHub Release';exit "$rc";};cur=$($bin --version|sed -n 's/.* v\([0-9][^ ]*\).*/v\1/p'|head -1);cmp=$(vercmp "$cur" "$tag");[ "$cmp" -lt 0 ]||{ [ "$cmp" -eq 0 ]&&{ echo "✅ Server 已是 $tag";exit 0;};err "拒绝降级：当前 $cur，请求 $tag";exit 4;};exec /usr/local/lib/nodelume/install-server.sh -v "$tag";fi;;
  apply-update-request)
    [ "$kind" = server ]||exit 2;[ "$(id -u)" -eq 0 ]||exit 5;f=/var/lib/nodelume/update/request.json;[ -r "$f" ]||exit 0;tag=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\(v[0-9][0-9.]*\)".*/\1/p' "$f"|head -1);printf %s "$tag"|grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'||{ rm -f "$f";exit 2;};rm -f "$f";mkdir -p /var/lib/nodelume/update;printf '{"state":"running","version":"%s"}\n' "$tag">/var/lib/nodelume/update/status.json;if /usr/local/lib/nodelume/install-server.sh -v "$tag";then printf '{"state":"success","version":"%s"}\n' "$tag">/var/lib/nodelume/update/status.json;else rc=$?;printf '{"state":"failed","version":"%s","exit_code":%s}\n' "$tag" "$rc">/var/lib/nodelume/update/status.json;exit "$rc";fi;;
  rm|uninstall)
