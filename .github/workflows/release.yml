@@ -42,21 +42,21 @@ jobs:
             
             cp release.pub dist/release.pub
             cp scripts/install-server.sh scripts/install-agent.sh scripts/nlm dist/
-            
-            for INSTALLER in dist/install-server.sh dist/install-agent.sh; do
-            sed -i "s/^VERIFIER_SHA_AMD64='[^']*'/VERIFIER_SHA_AMD64='$GOT_AMD64'/" "$INSTALLER"
-            sed -i "s/^VERIFIER_SHA_ARM64='[^']*'/VERIFIER_SHA_ARM64='$GOT_ARM64'/" "$INSTALLER"
           
-            grep -q "^VERIFIER_SHA_AMD64='$GOT_AMD64'" "$INSTALLER" || {
+          for INSTALLER in dist/install-server.sh dist/install-agent.sh; do
+            sed -i "s/VERIFIER_SHA_AMD64='[^']*'/VERIFIER_SHA_AMD64='$GOT_AMD64'/g" "$INSTALLER"
+            sed -i "s/VERIFIER_SHA_ARM64='[^']*'/VERIFIER_SHA_ARM64='$GOT_ARM64'/g" "$INSTALLER"
+          
+            grep -Fq "VERIFIER_SHA_AMD64='$GOT_AMD64'" "$INSTALLER" || {
             echo "failed to pin amd64 verifier hash into $INSTALLER" >&2
             exit 1
           }
           
-            grep -q "^VERIFIER_SHA_ARM64='$GOT_ARM64'" "$INSTALLER" || {
+            grep -Fq "VERIFIER_SHA_ARM64='$GOT_ARM64'" "$INSTALLER" || {
             echo "failed to pin arm64 verifier hash into $INSTALLER" >&2
             exit 1
           }
-            done
+          done
           cat > dist/release-manifest.json <<JSON
           {"version":"$V","protocol":1,"min_agent":"1.0.0","min_server":"1.0.0"}
           JSON

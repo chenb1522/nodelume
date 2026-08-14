@@ -2,7 +2,8 @@
 set -eu
 VERSION=latest; SERVER=""; TOKEN=""; NAME=""; LOCAL_DIR=""; REPO=${NODELUME_RELEASE_REPO:-chenb1522/nodelume}
 PUB='HuKgHCbJ3RDisYmD0u0sI0Jj86cQJJa7KVzDKvNAK4U='
-VERIFIER_SHA_AMD64='70a31e6f2d2232be9ccbaf2b5c40c745547fb6656a68f558ea981743434679cf'; VERIFIER_SHA_ARM64='6cd3ec1ff2e3577de935af02ed43f86062382295087f9ed3ff22e9d12f77d728'
+VERIFIER_SHA_AMD64='70a31e6f2d2232be9ccbaf2b5c40c745547fb6656a68f558ea981743434679cf'
+VERIFIER_SHA_ARM64='6cd3ec1ff2e3577de935af02ed43f86062382295087f9ed3ff22e9d12f77d728'
 info(){ printf '\033[34m[INFO]\033[0m %s\n' "$*"; }; ok(){ printf '\033[32m[ OK ]\033[0m %s\n' "$*"; }; fail(){ printf '\033[31m[FAIL]\033[0m %s\n' "$*" >&2; }; if [ ! -t 1 ]; then info(){ printf '[INFO] %s\n' "$*"; }; ok(){ printf '[ OK ] %s\n' "$*"; }; fail(){ printf '[FAIL] %s\n' "$*" >&2; }; fi
 usage(){ cat <<'EOF'
 NodeLume Agent Installer
