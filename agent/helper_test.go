@@ -60,17 +60,11 @@ func TestVersionAndRepoValidation(t *testing.T) {
 }
 
 func TestValidateServerURL(t *testing.T) {
-	good := []string{"https://monitor.example.com", "http://127.0.0.1:8080", "http://localhost:8080"}
+	good := []string{"https://monitor.example.com", "http://127.0.0.1:8080", "http://localhost:8080", "http://203.0.113.9:8080"}
 	for _, u := range good {
 		if err := validateServerURL(u, false); err != nil {
 			t.Fatalf("expected URL %q to be allowed: %v", u, err)
 		}
-	}
-	if err := validateServerURL("http://203.0.113.9:8080", false); err == nil {
-		t.Fatal("remote plain HTTP should be rejected")
-	}
-	if err := validateServerURL("http://203.0.113.9:8080", true); err != nil {
-		t.Fatalf("explicit insecure test override rejected: %v", err)
 	}
 	for _, u := range []string{"ftp://example.com", "not-a-url", ""} {
 		if err := validateServerURL(u, false); err == nil {

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="32f16dc7-218f-4930-a1ca-c5dda2af98ce" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/.github/workflows/release.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.github/workflows/release.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/TEST_REPORT.md" beforeDir="false" afterPath="$PROJECT_DIR$/TEST_REPORT.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agent/helper_test.go" beforeDir="false" afterPath="$PROJECT_DIR$/agent/helper_test.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/agent/main.go" beforeDir="false" afterPath="$PROJECT_DIR$/agent/main.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/install-agent.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/install-agent.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/install-server.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/install-server.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/uninstall-agent.sh" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/uninstall-server.sh" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/update-agent.sh" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/update-server.sh" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/acme.go" beforeDir="false" afterPath="$PROJECT_DIR$/server/acme.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/main.go" beforeDir="false" afterPath="$PROJECT_DIR$/server/main.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/release.go" beforeDir="false" afterPath="$PROJECT_DIR$/server/release.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/web/app.css" beforeDir="false" afterPath="$PROJECT_DIR$/server/web/app.css" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/web/app.js" beforeDir="false" afterPath="$PROJECT_DIR$/server/web/app.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server/web/index.html" beforeDir="false" afterPath="$PROJECT_DIR$/server/web/index.html" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/chenb1522/nodelume.git",
+    "accountId": "df990382-b708-41c7-b7b6-843c3b67acee"
+  }
+}]]></component>
+  <component name="GoVcsConfiguration">
+    <option name="GO_FMT" value="false" />
+  </component>
+  <component name="ProjectColorInfo"><![CDATA[{
+  "associatedIndex": 2,
+  "fromUser": false
+}]]></component>
+  <component name="ProjectId" id="3HtC41BgG9mhZ7CzRBkB7W8rKj8" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.GoLinterPluginOnboardingV2": "true",
+    "RunOnceActivity.GoLinterPluginStorageMigration": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.go.analysis.ui.options.defaults": "true",
+    "RunOnceActivity.go.formatter.settings.were.checked": "true",
+    "RunOnceActivity.go.modules.go.list.on.any.changes.was.set": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "git-widget-placeholder": "main",
+    "last_opened_file_path": "E:/Desktop/NodeLume-v1.0.0",
+    "nodejs_package_manager_path": "npm"
+  }
+}]]></component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-gosdk-63c95d513abe-9addb268e56c-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-262.9437.195" />
+        <option value="bundled-js-predefined-d6986cc7102b-4abd2a77f808-JavaScript-GO-262.9437.195" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="默认任务">
+      <changelist id="32f16dc7-218f-4930-a1ca-c5dda2af98ce" name="更改" comment="" />
+      <created>1786677782478</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1786677782478</updated>
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <option name="CHECK_CODE_SMELLS_BEFORE_PROJECT_COMMIT" value="false" />
+    <option name="CHECK_NEW_TODO" value="false" />
+    <option name="NON_MODAL_COMMIT_POSTPONE_SLOW_CHECKS" value="false" />
+  </component>
+</project>

@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Bootstrap verifier SHA-256 pins depend on reproducible output.
+          # Keep this exact until a deliberate verifier trust-root transition.
+          go-version: '1.23.2'
           cache: true
       - name: Test and validate
         run: |
@@ -32,9 +34,20 @@ jobs:
           for ARCH in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.serverVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-server-linux-$ARCH" ./server
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.agentVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-agent-linux-$ARCH" ./agent
+            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w" -o "dist/nodelume-verify-linux-$ARCH" ./tools/verify
           done
+          # The first-install verifier is trusted by SHA-256 pins embedded in both installers.
+          # Refuse a release if the verifier bits changed unexpectedly.
+          WANT_AMD64=$(sed -n "s/^VERIFIER_SHA_AMD64='\([^']*\)'.*/\1/p" scripts/install-server.sh)
+          WANT_ARM64=$(sed -n "s/^VERIFIER_SHA_ARM64='\([^']*\)'.*/\1/p" scripts/install-server.sh)
+          GOT_AMD64=$(sha256sum dist/nodelume-verify-linux-amd64 | awk '{print $1}')
+          GOT_ARM64=$(sha256sum dist/nodelume-verify-linux-arm64 | awk '{print $1}')
+          test "$WANT_AMD64" = "$GOT_AMD64" || { echo "amd64 verifier bootstrap pin mismatch" >&2; exit 1; }
+          test "$WANT_ARM64" = "$GOT_ARM64" || { echo "arm64 verifier bootstrap pin mismatch" >&2; exit 1; }
+          grep -q "$WANT_AMD64" scripts/install-agent.sh || { echo "agent amd64 verifier pin mismatch" >&2; exit 1; }
+          grep -q "$WANT_ARM64" scripts/install-agent.sh || { echo "agent arm64 verifier pin mismatch" >&2; exit 1; }
           cp release.pub dist/release.pub
-          cp scripts/*.sh dist/
+          cp scripts/install-server.sh scripts/install-agent.sh scripts/nlm dist/
           cat > dist/release-manifest.json <<JSON
           {"version":"$V","protocol":1,"min_agent":"1.0.0","min_server":"1.0.0"}
           JSON
@@ -44,7 +57,7 @@ jobs:
         run: |
           set -eu
           cd dist
-          sha256sum nodelume-server-linux-* nodelume-agent-linux-* release.pub release-manifest.json *.sh > checksums.txt
+          sha256sum nodelume-server-linux-* nodelume-agent-linux-* nodelume-verify-linux-* release.pub release-manifest.json install-server.sh install-agent.sh nlm > checksums.txt
           cd ..
           NODELUME_RELEASE_PUBLIC_KEY="$(cat release.pub)" go run ./tools/sign dist/checksums.txt dist/checksums.sig
       - name: Create GitHub Release

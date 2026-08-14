@@ -157,7 +157,7 @@ func (a *App) updateStatus(w http.ResponseWriter, r *http.Request) {
 		if n.Registered {
 			status = "offline"
 		}
-		if rt != nil && !rt.LastSeen.IsZero() && time.Since(rt.LastSeen) < 30*time.Second {
+		if nodeIsOnline(n, rt) {
 			status = "online"
 		}
 		agents = append(agents, map[string]any{"id": id, "name": n.Name, "status": status, "version": n.System.Agent, "protocol": n.System.Protocol})

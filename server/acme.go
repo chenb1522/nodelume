@@ -22,24 +22,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type HTTPSRuntime struct {
-	mu            sync.RWMutex
-	domain        string
-	cert          atomic.Pointer[tls.Certificate]
-	challenges    map[string]string
-	challengeMu   sync.RWMutex
-	httpListener  net.Listener
-	httpsListener net.Listener
-	httpServer    *http.Server
-	httpsServer   *http.Server
+	challenges  map[string]string
+	challengeMu sync.RWMutex
 }
 
 type CertStatus struct {
 	Mode      string `json:"mode"`
+	Source    string `json:"source,omitempty"`
 	Domain    string `json:"domain"`
 	Status    string `json:"status"`
 	NotAfter  int64  `json:"not_after,omitempty"`
@@ -66,14 +59,12 @@ type acmeAuthz struct {
 	Status     string                                      `json:"status"`
 	Challenges []struct{ Type, URL, Token, Status string } `json:"challenges"`
 }
-
 type jwkEC struct {
 	Crv string `json:"crv"`
 	Kty string `json:"kty"`
 	X   string `json:"x"`
 	Y   string `json:"y"`
 }
-
 type acmeClient struct {
 	http *http.Client
 	dir  acmeDirectory
@@ -83,7 +74,7 @@ type acmeClient struct {
 
 func validDomain(d string) bool {
 	d = strings.TrimSpace(strings.ToLower(d))
-	if len(d) < 4 || len(d) > 253 || strings.Contains(d, "/") || strings.Contains(d, ":") || strings.HasPrefix(d, ".") || strings.HasSuffix(d, ".") {
+	if len(d) < 4 || len(d) > 253 || strings.ContainsAny(d, "/:") || strings.HasPrefix(d, ".") || strings.HasSuffix(d, ".") {
 		return false
 	}
 	labels := strings.Split(d, ".")
@@ -95,7 +86,7 @@ func validDomain(d string) bool {
 			return false
 		}
 		for _, r := range l {
-			if !(r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z') {
+			if !(r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z')) {
 				return false
 			}
 		}
@@ -106,18 +97,17 @@ func validDomain(d string) bool {
 func (a *App) checkHTTPSSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Domain string `json:"domain"`
-		Mode   string `json:"mode"`
+		Mode   string `json:"mode,omitempty"`
 	}
 	if !decodeJSON(w, r, &in, 1<<14) {
 		return
 	}
 	in.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
-	if in.Mode != "off" && !validDomain(in.Domain) {
-		jsonError(w, "invalid domain", 400)
-		return
+	if in.Mode == "" {
+		in.Mode = "builtin"
 	}
-	if in.Mode != "off" && in.Mode != "proxy" && in.Mode != "builtin" {
-		jsonError(w, "invalid HTTPS mode", 400)
+	if in.Mode != "off" && !validDomain(in.Domain) {
+		jsonErrorCode(w, "INVALID_DOMAIN", "域名格式无效", "请输入已解析到当前 Server 的域名", 400)
 		return
 	}
 	out := map[string]any{"ok": true, "domain": in.Domain, "mode": in.Mode}
@@ -129,129 +119,142 @@ func (a *App) checkHTTPSSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.Mode == "builtin" {
-		a.httpsMu.Lock()
-		active := a.httpsRuntime != nil
-		a.httpsMu.Unlock()
-		if !active {
-			for _, addr := range []string{":80", ":443"} {
-				ln, err := net.Listen("tcp", addr)
-				if err != nil {
-					jsonError(w, "port check failed for "+addr+": "+err.Error(), 409)
-					return
-				}
-				ln.Close()
-			}
+		ln, err := net.Listen("tcp", ":80")
+		if err != nil {
+			jsonErrorCode(w, "ACME_PORT_IN_USE", "HTTP-01 需要公网 80 端口，但当前无法监听", err.Error(), 409)
+			return
 		}
+		_ = ln.Close()
 	}
 	writeJSON(w, 200, out)
 }
 
+// applyHTTPSSettings is the public "申请证书" endpoint. The user only supplies a domain;
+// HTTP-01 and ACME details stay internal. The certificate is activated on the configured
+// NodeLume listen port after a controlled Server restart.
 func (a *App) applyHTTPSSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Domain string `json:"domain"`
-		Mode   string `json:"mode"`
+		Mode   string `json:"mode,omitempty"`
 	}
 	if !decodeJSON(w, r, &in, 1<<14) {
 		return
 	}
 	in.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
-	if in.Mode != "off" && !validDomain(in.Domain) {
-		jsonError(w, "invalid domain", 400)
-		return
+	if in.Mode == "" {
+		in.Mode = "builtin"
 	}
-	if in.Mode != "off" && in.Mode != "proxy" && in.Mode != "builtin" {
-		jsonError(w, "invalid HTTPS mode", 400)
-		return
-	}
-	if in.Mode == "builtin" {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		if err := a.startBuiltinHTTPSContext(ctx, in.Domain); err != nil {
-			a.audit(a.remoteIP(r), "https_apply", "", in.Domain, "failed: "+err.Error())
-			jsonError(w, "built-in HTTPS was not changed: "+err.Error(), 409)
+	if in.Mode == "off" {
+		a.mu.Lock()
+		old := a.state.Settings.Domain
+		a.state.Settings.Domain = ""
+		a.state.Settings.HTTPSMode = "off"
+		a.state.Settings.CertificateSource = ""
+		a.auditLocked(a.remoteIP(r), "https_apply", "", old+" -> off", "success")
+		err := a.saveLocked()
+		a.mu.Unlock()
+		if err != nil {
+			jsonError(w, "save failed", 500)
 			return
 		}
-	} else {
-		a.stopBuiltinHTTPS()
+		writeJSON(w, 200, map[string]any{"ok": true, "restart_required": true})
+		return
 	}
-	ip := a.remoteIP(r)
+	if in.Mode != "builtin" || !validDomain(in.Domain) {
+		jsonErrorCode(w, "INVALID_DOMAIN", "域名格式无效", "请输入有效域名", 400)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	if err := a.ensureManagedCertificate(ctx, in.Domain, true); err != nil {
+		a.audit(a.remoteIP(r), "certificate_issue", "", in.Domain, "failed: "+err.Error())
+		jsonErrorCode(w, "ACME_CHALLENGE_FAILED", err.Error(), "检查域名 DNS、防火墙和公网 80 端口", 409)
+		return
+	}
 	a.mu.Lock()
 	old := a.state.Settings.Domain
 	a.state.Settings.Domain = in.Domain
-	a.state.Settings.HTTPSMode = in.Mode
-	a.auditLocked(ip, "https_apply", "", fmt.Sprintf("%s -> %s (%s)", old, in.Domain, in.Mode), "success")
+	a.state.Settings.HTTPSMode = "builtin"
+	a.state.Settings.CertificateSource = "acme"
+	a.auditLocked(a.remoteIP(r), "certificate_issue", "", fmt.Sprintf("%s -> %s", old, in.Domain), "success")
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonErrorCode(w, "CERT_SAVE_FAILED", "证书已签发但配置保存失败", err.Error(), 500)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "settings": map[string]any{"domain": in.Domain, "https_mode": in.Mode}, "certificate": a.certificateStatus()})
+	writeJSON(w, 200, map[string]any{"ok": true, "certificate": a.certificateStatus(), "restart_required": true, "access_url": domainAccessURL(in.Domain, a.activeListen)})
 }
 
 func (a *App) checkCertificate(w http.ResponseWriter, r *http.Request) {
 	a.mu.RLock()
-	mode, domain := a.state.Settings.HTTPSMode, a.state.Settings.Domain
+	mode, domain, source := a.state.Settings.HTTPSMode, a.state.Settings.Domain, a.state.Settings.CertificateSource
 	a.mu.RUnlock()
 	if mode != "builtin" || domain == "" {
 		writeJSON(w, 200, a.certificateStatus())
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	defer cancel()
-	if err := a.ensureCertificate(ctx, domain, false); err != nil {
-		a.audit(a.remoteIP(r), "certificate_check", "", domain, "failed: "+err.Error())
-		jsonError(w, err.Error(), 503)
-		return
+	if source == "acme" {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		if err := a.ensureManagedCertificate(ctx, domain, false); err != nil {
+			a.audit(a.remoteIP(r), "certificate_check", "", domain, "failed: "+err.Error())
+			jsonErrorCode(w, "ACME_CHALLENGE_FAILED", err.Error(), "检查 DNS、防火墙和公网 80 端口", 503)
+			return
+		}
 	}
 	a.audit(a.remoteIP(r), "certificate_check", "", domain, "success")
 	writeJSON(w, 200, a.certificateStatus())
 }
 func (a *App) autoRenewCertificate() {
 	a.mu.RLock()
-	mode, domain := a.state.Settings.HTTPSMode, a.state.Settings.Domain
+	mode, domain, source := a.state.Settings.HTTPSMode, a.state.Settings.Domain, a.state.Settings.CertificateSource
 	a.mu.RUnlock()
-	if mode != "builtin" || domain == "" {
+	if mode != "builtin" || domain == "" || source != "acme" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := a.ensureCertificate(ctx, domain, false); err != nil {
+	if err := a.ensureManagedCertificate(ctx, domain, false); err != nil {
 		log.Printf("certificate renewal check: %v", err)
 	}
 }
 
 func (a *App) certificateStatus() CertStatus {
 	a.mu.RLock()
-	mode, domain := a.state.Settings.HTTPSMode, a.state.Settings.Domain
+	mode, domain, source := a.state.Settings.HTTPSMode, a.state.Settings.Domain, a.state.Settings.CertificateSource
 	a.mu.RUnlock()
-	s := CertStatus{Mode: mode, Domain: domain, Status: "not_managed", AutoRenew: mode == "builtin"}
+	s := CertStatus{Mode: mode, Source: source, Domain: domain, Status: "not_managed", AutoRenew: mode == "builtin" && source == "acme"}
 	if mode != "builtin" || domain == "" {
 		return s
 	}
-	certPath, _ := a.certPaths(domain)
-	b, err := os.ReadFile(certPath)
+	certPath, keyPath := a.certPaths(domain)
+	cert, err := loadTLSCertificate(certPath, keyPath)
 	if err != nil {
 		s.Status = "missing"
 		s.Error = err.Error()
 		return s
 	}
-	block, _ := pem.Decode(b)
-	if block == nil {
+	if len(cert.Certificate) == 0 {
 		s.Status = "invalid"
 		return s
 	}
-	c, err := x509.ParseCertificate(block.Bytes)
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		s.Status = "invalid"
 		s.Error = err.Error()
 		return s
 	}
-	s.NotAfter = c.NotAfter.Unix()
-	s.DaysLeft = int(time.Until(c.NotAfter).Hours() / 24)
-	if time.Now().After(c.NotAfter) {
+	if err = leaf.VerifyHostname(domain); err != nil {
+		s.Status = "invalid"
+		s.Error = err.Error()
+		return s
+	}
+	s.NotAfter = leaf.NotAfter.Unix()
+	s.DaysLeft = int(time.Until(leaf.NotAfter).Hours() / 24)
+	if time.Now().After(leaf.NotAfter) {
 		s.Status = "expired"
-	} else if s.DaysLeft < 30 {
+	} else if s.AutoRenew && s.DaysLeft < 30 {
 		s.Status = "renewal_due"
 	} else {
 		s.Status = "valid"
@@ -259,155 +262,6 @@ func (a *App) certificateStatus() CertStatus {
 	return s
 }
 
-func (a *App) startBuiltinHTTPS(domain string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	return a.startBuiltinHTTPSContext(ctx, domain)
-}
-func (a *App) startBuiltinHTTPSContext(ctx context.Context, domain string) error {
-	a.httpsMu.Lock()
-	defer a.httpsMu.Unlock()
-	if a.httpsRuntime != nil {
-		rt := a.httpsRuntime
-		rt.mu.RLock()
-		same := rt.domain == domain
-		rt.mu.RUnlock()
-		if same {
-			return a.ensureCertificateWithRuntime(ctx, domain, false, rt)
-		}
-		if err := a.ensureCertificateWithRuntime(ctx, domain, true, rt); err != nil {
-			return err
-		}
-		rt.mu.Lock()
-		rt.domain = domain
-		rt.mu.Unlock()
-		return nil
-	}
-	l80, err := net.Listen("tcp", ":80")
-	if err != nil {
-		return fmt.Errorf("listen port 80: %w", err)
-	}
-	l443, err := net.Listen("tcp", ":443")
-	if err != nil {
-		l80.Close()
-		return fmt.Errorf("listen port 443: %w", err)
-	}
-	rt := &HTTPSRuntime{domain: domain, challenges: map[string]string{}, httpListener: l80, httpsListener: l443}
-	redirect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
-			token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
-			rt.challengeMu.RLock()
-			v, ok := rt.challenges[token]
-			rt.challengeMu.RUnlock()
-			if ok {
-				w.Header().Set("Content-Type", "text/plain")
-				io.WriteString(w, v)
-				return
-			}
-		}
-		rt.mu.RLock()
-		d := rt.domain
-		rt.mu.RUnlock()
-		http.Redirect(w, r, "https://"+d+r.URL.RequestURI(), http.StatusPermanentRedirect)
-	})
-	rt.httpServer = &http.Server{Handler: redirect, ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		if er := rt.httpServer.Serve(l80); er != nil && er != http.ErrServerClosed {
-			log.Printf("ACME HTTP listener: %v", er)
-		}
-	}()
-	if err := a.ensureCertificateWithRuntime(ctx, domain, false, rt); err != nil {
-		rt.httpServer.Close()
-		l443.Close()
-		return err
-	}
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		c := rt.cert.Load()
-		if c == nil {
-			return nil, errors.New("certificate unavailable")
-		}
-		rt.mu.RLock()
-		d := rt.domain
-		rt.mu.RUnlock()
-		if chi.ServerName != "" && !strings.EqualFold(chi.ServerName, d) {
-			return nil, errors.New("unrecognized TLS hostname")
-		}
-		return c, nil
-	}}
-	rt.httpsServer = &http.Server{Handler: a.handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 65 * time.Second, TLSConfig: tlsCfg}
-	go func() {
-		tl := tls.NewListener(l443, tlsCfg)
-		if er := rt.httpsServer.Serve(tl); er != nil && er != http.ErrServerClosed {
-			log.Printf("HTTPS listener: %v", er)
-		}
-	}()
-	a.httpsRuntime = rt
-	return nil
-}
-func (a *App) stopBuiltinHTTPS() {
-	a.httpsMu.Lock()
-	rt := a.httpsRuntime
-	a.httpsRuntime = nil
-	a.httpsMu.Unlock()
-	if rt != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if rt.httpServer != nil {
-			_ = rt.httpServer.Shutdown(ctx)
-		}
-		if rt.httpsServer != nil {
-			_ = rt.httpsServer.Shutdown(ctx)
-		}
-		if rt.httpListener != nil {
-			_ = rt.httpListener.Close()
-		}
-		if rt.httpsListener != nil {
-			_ = rt.httpsListener.Close()
-		}
-	}
-}
-func (a *App) ensureCertificate(ctx context.Context, domain string, force bool) error {
-	a.httpsMu.Lock()
-	rt := a.httpsRuntime
-	a.httpsMu.Unlock()
-	if rt == nil {
-		return errors.New("built-in HTTPS listener is not active")
-	}
-	return a.ensureCertificateWithRuntime(ctx, domain, force, rt)
-}
-func (a *App) ensureCertificateWithRuntime(ctx context.Context, domain string, force bool, rt *HTTPSRuntime) error {
-	certPath, keyPath := a.certPaths(domain)
-	if !force {
-		if cert, err := loadTLSCertificate(certPath, keyPath); err == nil {
-			if len(cert.Certificate) > 0 {
-				leaf, _ := x509.ParseCertificate(cert.Certificate[0])
-				if leaf != nil && time.Until(leaf.NotAfter) > 30*24*time.Hour {
-					rt.cert.Store(cert)
-					return nil
-				}
-			}
-		}
-	}
-	certPEM, keyPEM, err := a.obtainACMECertificate(ctx, domain, rt)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(a.acmeDir, 0700); err != nil {
-		return err
-	}
-	if err := atomicWrite(certPath, certPEM, 0600); err != nil {
-		return err
-	}
-	if err := atomicWrite(keyPath, keyPEM, 0600); err != nil {
-		return err
-	}
-	cert, err := loadTLSCertificate(certPath, keyPath)
-	if err != nil {
-		return err
-	}
-	rt.cert.Store(cert)
-	return nil
-}
 func (a *App) certPaths(domain string) (string, string) {
 	safe := strings.ReplaceAll(domain, "*", "wildcard")
 	return filepath.Join(a.acmeDir, safe+".crt"), filepath.Join(a.acmeDir, safe+".key")
@@ -418,6 +272,124 @@ func loadTLSCertificate(certPath, keyPath string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+func (a *App) ensureManagedCertificate(ctx context.Context, domain string, force bool) error {
+	certPath, keyPath := a.certPaths(domain)
+	if !force {
+		if c, err := loadTLSCertificate(certPath, keyPath); err == nil && len(c.Certificate) > 0 {
+			if leaf, _ := x509.ParseCertificate(c.Certificate[0]); leaf != nil && leaf.VerifyHostname(domain) == nil && time.Until(leaf.NotAfter) > 30*24*time.Hour {
+				return nil
+			}
+		}
+	}
+	rt := &HTTPSRuntime{challenges: map[string]string{}}
+	ln, err := net.Listen("tcp", ":80")
+	if err != nil {
+		return fmt.Errorf("HTTP-01 无法监听公网 80 端口: %w", err)
+	}
+	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
+		if token == r.URL.Path {
+			http.NotFound(w, r)
+			return
+		}
+		rt.challengeMu.RLock()
+		v, ok := rt.challenges[token]
+		rt.challengeMu.RUnlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, v)
+	})}
+	go func() {
+		if er := srv.Serve(ln); er != nil && er != http.ErrServerClosed {
+			log.Printf("ACME HTTP-01 listener: %v", er)
+		}
+	}()
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(c)
+		_ = ln.Close()
+	}()
+	certPEM, keyPEM, err := a.obtainACMECertificate(ctx, domain, rt)
+	if err != nil {
+		return err
+	}
+	return installCertificatePair(certPath, keyPath, certPEM, keyPEM)
+}
+
+func installCertificatePair(certPath, keyPath string, certPEM, keyPEM []byte) error {
+	if err := os.MkdirAll(filepath.Dir(certPath), 0700); err != nil {
+		return err
+	}
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("certificate/key mismatch: %w", err)
+	}
+	suffix := fmt.Sprintf(".%d.tmp", time.Now().UnixNano())
+	ct, kt := certPath+suffix, keyPath+suffix
+	cleanup := func() { _ = os.Remove(ct); _ = os.Remove(kt) }
+	defer cleanup()
+	writeTmp := func(path string, b []byte) error {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		if _, err = f.Write(b); err == nil {
+			err = f.Sync()
+		}
+		ce := f.Close()
+		if err == nil {
+			err = ce
+		}
+		return err
+	}
+	if err := writeTmp(ct, certPEM); err != nil {
+		return err
+	}
+	if err := writeTmp(kt, keyPEM); err != nil {
+		return err
+	}
+	if _, err := tls.LoadX509KeyPair(ct, kt); err != nil {
+		return err
+	}
+	oldCert, certErr := os.ReadFile(certPath)
+	oldKey, keyErr := os.ReadFile(keyPath)
+	if err := os.Rename(ct, certPath); err != nil {
+		return err
+	}
+	if err := os.Rename(kt, keyPath); err != nil {
+		if certErr == nil {
+			_ = atomicWrite(certPath, oldCert, 0600)
+		} else {
+			_ = os.Remove(certPath)
+		}
+		return err
+	}
+	if d, er := os.Open(filepath.Dir(certPath)); er == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	_ = oldKey
+	_ = keyErr
+	return nil
+}
+
+// Compatibility wrappers: built-in HTTPS no longer opens a second :443 listener.
+func (a *App) startBuiltinHTTPS(domain string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	return a.ensureManagedCertificate(ctx, domain, false)
+}
+func (a *App) startBuiltinHTTPSContext(ctx context.Context, domain string) error {
+	return a.ensureManagedCertificate(ctx, domain, false)
+}
+func (a *App) stopBuiltinHTTPS() {}
+func (a *App) ensureCertificate(ctx context.Context, domain string, force bool) error {
+	return a.ensureManagedCertificate(ctx, domain, force)
 }
 
 func (a *App) obtainACMECertificate(ctx context.Context, domain string, rt *HTTPSRuntime) ([]byte, []byte, error) {
@@ -702,4 +674,95 @@ func padded(b []byte, n int) []byte {
 	out := make([]byte, n)
 	copy(out[n-len(b):], b)
 	return out
+}
+
+func (a *App) importCertificate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Domain      string `json:"domain"`
+		Certificate string `json:"certificate"`
+		PrivateKey  string `json:"private_key"`
+	}
+	if !decodeJSON(w, r, &in, 3<<20) {
+		return
+	}
+	in.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
+	if in.Domain == "" {
+		a.mu.RLock()
+		in.Domain = a.state.Settings.Domain
+		a.mu.RUnlock()
+	}
+	if !validDomain(in.Domain) {
+		jsonErrorCode(w, "CERT_DOMAIN_MISMATCH", "请先填写有效域名", "证书必须对应将要使用的域名", 400)
+		return
+	}
+	certPEM, keyPEM := []byte(in.Certificate), []byte(in.PrivateKey)
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		jsonErrorCode(w, "CERT_PARSE_FAILED", "证书和私钥不能为空", "请提供 Full Chain 和私钥 PEM", 400)
+		return
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		jsonErrorCode(w, "CERT_KEY_MISMATCH", "证书与私钥不匹配", err.Error(), 400)
+		return
+	}
+	if len(pair.Certificate) == 0 {
+		jsonErrorCode(w, "CERT_PARSE_FAILED", "证书内容为空", "请提供有效 PEM", 400)
+		return
+	}
+	certs := make([]*x509.Certificate, 0, len(pair.Certificate))
+	for _, der := range pair.Certificate {
+		c, e := x509.ParseCertificate(der)
+		if e != nil {
+			jsonErrorCode(w, "CERT_PARSE_FAILED", "证书链解析失败", e.Error(), 400)
+			return
+		}
+		certs = append(certs, c)
+	}
+	leaf := certs[0]
+	if err = leaf.VerifyHostname(in.Domain); err != nil {
+		jsonErrorCode(w, "CERT_DOMAIN_MISMATCH", "证书不包含配置域名", err.Error(), 400)
+		return
+	}
+	if time.Now().After(leaf.NotAfter) {
+		jsonErrorCode(w, "CERT_EXPIRED", "证书已过期", "请导入有效证书", 400)
+		return
+	}
+	for i := 0; i+1 < len(certs); i++ {
+		if err = certs[i].CheckSignatureFrom(certs[i+1]); err != nil {
+			jsonErrorCode(w, "CERT_CHAIN_INCOMPLETE", "证书链顺序或签名无效", err.Error(), 400)
+			return
+		}
+	}
+	certPath, keyPath := a.certPaths(in.Domain)
+	oldCert, oldCertErr := os.ReadFile(certPath)
+	oldKey, oldKeyErr := os.ReadFile(keyPath)
+	if err = installCertificatePair(certPath, keyPath, certPEM, keyPEM); err != nil {
+		jsonErrorCode(w, "CERT_SAVE_FAILED", "证书保存失败", err.Error(), 500)
+		return
+	}
+	restorePair := func() {
+		if oldCertErr == nil && oldKeyErr == nil {
+			_ = installCertificatePair(certPath, keyPath, oldCert, oldKey)
+		} else {
+			_ = os.Remove(certPath)
+			_ = os.Remove(keyPath)
+		}
+	}
+	a.mu.Lock()
+	oldDomain, oldMode, oldSource := a.state.Settings.Domain, a.state.Settings.HTTPSMode, a.state.Settings.CertificateSource
+	a.state.Settings.Domain = in.Domain
+	a.state.Settings.HTTPSMode = "builtin"
+	a.state.Settings.CertificateSource = "manual"
+	a.auditLocked(a.remoteIP(r), "certificate_import", "", in.Domain, "success")
+	err = a.saveLocked()
+	if err != nil {
+		a.state.Settings.Domain, a.state.Settings.HTTPSMode, a.state.Settings.CertificateSource = oldDomain, oldMode, oldSource
+	}
+	a.mu.Unlock()
+	if err != nil {
+		restorePair()
+		jsonErrorCode(w, "CERT_SAVE_FAILED", "配置保存失败，已恢复原证书", err.Error(), 500)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "not_after": leaf.NotAfter.Unix(), "domain": in.Domain, "source": "manual", "restart_required": true, "access_url": domainAccessURL(in.Domain, a.activeListen)})
 }

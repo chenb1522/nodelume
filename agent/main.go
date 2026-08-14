@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	cryptorand "crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,7 +24,7 @@ import (
 	"time"
 )
 
-var agentVersion = "1.0.0"
+var agentVersion = "1.0.1"
 var releaseRepo = "chenb1522/nodelume"
 
 const protocolVersion = 1
@@ -34,7 +38,10 @@ type Config struct {
 	NodeID            string `json:"node_id,omitempty"`
 	Secret            string `json:"secret,omitempty"`
 	ReleaseRepo       string `json:"release_repo,omitempty"`
-	AllowInsecureHTTP bool   `json:"allow_insecure_http,omitempty"`
+	Name              string `json:"name,omitempty"`
+	ReportIntervalSec int    `json:"report_interval_sec,omitempty"`
+	ConfigVersion     int    `json:"config_version,omitempty"`
+	LogLevel          string `json:"log_level,omitempty"`
 }
 type ConfigState struct {
 	mu   sync.RWMutex
@@ -125,6 +132,7 @@ type Heartbeat struct {
 	TopCPU      []ProcessSummary `json:"top_cpu"`
 	TopMemory   []ProcessSummary `json:"top_memory"`
 	System      SystemInfo       `json:"system"`
+	Self        SelfStats        `json:"self,omitempty"`
 }
 type AgentCommand struct {
 	Protocol  int    `json:"protocol"`
@@ -135,6 +143,7 @@ type AgentCommand struct {
 	Version   string `json:"version,omitempty"`
 	RestartID string `json:"restart_id,omitempty"`
 	Unit      string `json:"unit,omitempty"`
+	Interval  int    `json:"interval,omitempty"`
 }
 type AgentResult struct {
 	RequestID string          `json:"request_id"`
@@ -144,17 +153,26 @@ type AgentResult struct {
 	Data      json.RawMessage `json:"data,omitempty"`
 }
 type RegisterRequest struct {
-	Token  string     `json:"token"`
-	System SystemInfo `json:"system"`
+	Token        string     `json:"token"`
+	Name         string     `json:"name,omitempty"`
+	EnrollmentID string     `json:"enrollment_id,omitempty"`
+	AgentVersion string     `json:"agent_version,omitempty"`
+	Protocol     int        `json:"protocol"`
+	System       SystemInfo `json:"system"`
 }
 type RegisterResponse struct {
-	NodeID string `json:"node_id"`
-	Secret string `json:"secret"`
+	NodeID            string `json:"node_id"`
+	Secret            string `json:"secret"`
+	ServerVersion     string `json:"server_version"`
+	ProtocolMin       int    `json:"protocol_min"`
+	ProtocolMax       int    `json:"protocol_max"`
+	ReportIntervalSec int    `json:"report_interval_sec"`
 }
 type HeartbeatResponse struct {
-	OK             bool   `json:"ok"`
-	ServerURL      string `json:"server_url"`
-	ServerProtocol int    `json:"server_protocol"`
+	OK                bool   `json:"ok"`
+	ServerURL         string `json:"server_url"`
+	ServerProtocol    int    `json:"server_protocol"`
+	ReportIntervalSec int    `json:"report_interval_sec"`
 }
 type DiskInfo struct {
 	Name    string  `json:"name"`
@@ -185,10 +203,13 @@ type Sampler struct {
 }
 
 func main() {
+	if handled, code := maybeRunAgentSubcommand(os.Args[1:]); handled {
+		os.Exit(code)
+	}
 	configPath := flag.String("config", "/var/lib/nodelume-agent/agent.json", "config file")
 	server := flag.String("server", "", "server URL")
 	token := flag.String("token", "", "one-time enrollment token")
-	allowInsecureHTTP := flag.Bool("allow-insecure-http", false, "allow plain HTTP to a non-loopback Server (unsafe; testing only)")
+	name := flag.String("name", "", "node display name used during enrollment")
 	helper := flag.Bool("helper", false, "run privileged local helper")
 	helperSock := flag.String("helper-socket", "", "helper socket for non-systemd tests")
 	showVersion := flag.Bool("version", false, "print version")
@@ -255,31 +276,41 @@ func main() {
 	if *token != "" {
 		cfg.EnrollmentToken = *token
 	}
-	if *allowInsecureHTTP {
-		cfg.AllowInsecureHTTP = true
+	if *name != "" {
+		cfg.Name = strings.TrimSpace(*name)
+	}
+	if cfg.ConfigVersion == 0 {
+		cfg.ConfigVersion = 2
+	}
+	if cfg.ReportIntervalSec == 0 {
+		cfg.ReportIntervalSec = 2
 	}
 	if cfg.ReleaseRepo == "" {
 		cfg.ReleaseRepo = *repoFlag
 	}
 	if cfg.Server == "" {
-		fatalf("missing server URL")
+		fmt.Println("NodeLume Agent: 未绑定 Server，使用 nlm agent bind -s <SERVER> -t <TOKEN> 完成绑定。")
+		select {}
 	}
 	cfg.Server = strings.TrimRight(cfg.Server, "/")
-	if err := validateServerURL(cfg.Server, cfg.AllowInsecureHTTP); err != nil {
+	if err := validateServerURL(cfg.Server); err != nil {
 		fatalf("server URL: %v", err)
 	}
 	state := &ConfigState{cfg: cfg, path: *configPath}
-	client := &http.Client{Timeout: 35 * time.Second}
+	client := agentHTTPClient(35 * time.Second)
 	sampler := newSampler()
 	if cfg.NodeID == "" || cfg.Secret == "" {
 		if cfg.EnrollmentToken == "" {
 			fatalf("agent is not enrolled and no enrollment token is configured")
 		}
 		var rr RegisterResponse
-		if err := doJSON(client, "POST", cfg.Server+"/api/agent/register", "", RegisterRequest{Token: cfg.EnrollmentToken, System: sampler.sys}, &rr); err != nil {
+		if err := doJSON(client, "POST", cfg.Server+"/api/agent/register", "", RegisterRequest{Token: cfg.EnrollmentToken, Name: cfg.Name, EnrollmentID: enrollmentID(cfg), AgentVersion: "v" + agentVersion, Protocol: protocolVersion, System: sampler.sys}, &rr); err != nil {
 			fatalf("registration failed: %v", err)
 		}
 		cfg.NodeID, cfg.Secret, cfg.EnrollmentToken = rr.NodeID, rr.Secret, ""
+		if rr.ReportIntervalSec > 0 {
+			cfg.ReportIntervalSec = rr.ReportIntervalSec
+		}
 		if err := state.set(cfg); err != nil {
 			fatalf("save config: %v", err)
 		}
@@ -293,40 +324,47 @@ func main() {
 }
 
 func heartbeatLoop(client *http.Client, state *ConfigState, s *Sampler) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
 	firstCommit := true
 	for {
 		cfg := state.get()
 		hb := s.Sample()
+		hb.Self = agentSelfStats(state.path)
+		writeAgentRuntimeStatus(state.path, hb.Self, cfg)
 		var out HeartbeatResponse
 		err := doJSON(client, "POST", cfg.Server+"/api/agent/heartbeat", auth(cfg), hb, &out)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "heartbeat: %v\n", err)
 		} else {
-			// A newly installed Agent is only committed after it can heartbeat a
-			// Server speaking the same protocol. Otherwise the privileged helper
-			// keeps the previous binary and its watchdog rolls the update back.
 			if firstCommit && out.ServerProtocol == protocolVersion {
 				if _, er := helperCall(HelperRequest{Action: "agent_update_commit"}, 10*time.Second); er == nil {
 					firstCommit = false
 				}
 			}
-			if out.ServerURL != "" && out.ServerURL != cfg.Server && strings.HasPrefix(out.ServerURL, "https://") {
-				if verifyEndpoint(out.ServerURL) {
-					cfg.Server = strings.TrimRight(out.ServerURL, "/")
-					if state.set(cfg) == nil {
-						fmt.Fprintf(os.Stderr, "server endpoint migrated to %s; restarting agent\n", cfg.Server)
-						os.Exit(0)
+			if out.ReportIntervalSec == 2 || out.ReportIntervalSec == 5 || out.ReportIntervalSec == 10 || out.ReportIntervalSec == 30 || out.ReportIntervalSec == 60 {
+				if out.ReportIntervalSec != cfg.ReportIntervalSec {
+					cfg.ReportIntervalSec = out.ReportIntervalSec
+					_ = state.set(cfg)
+				}
+			}
+			if out.ServerURL != "" && out.ServerURL != cfg.Server {
+				next := cfg
+				next.Server = strings.TrimRight(out.ServerURL, "/")
+				if validateServerURL(next.Server) == nil && testAuthenticatedServer(next.Server, next) == nil {
+					if state.set(next) == nil {
+						fmt.Fprintf(os.Stderr, "server endpoint migrated to %s\n", next.Server)
 					}
 				}
 			}
 		}
-		<-ticker.C
+		interval := state.get().ReportIntervalSec
+		if interval != 2 && interval != 5 && interval != 10 && interval != 30 && interval != 60 {
+			interval = 2
+		}
+		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
 func verifyEndpoint(base string) bool {
-	c := &http.Client{Timeout: 5 * time.Second}
+	c := agentHTTPClient(5 * time.Second)
 	resp, err := c.Get(strings.TrimRight(base, "/") + "/healthz")
 	if err != nil {
 		return false
@@ -338,7 +376,7 @@ func commandLoop(client *http.Client, state *ConfigState, s *Sampler) {
 	for {
 		cfg := state.get()
 		req, _ := http.NewRequest("GET", cfg.Server+"/api/agent/commands?wait=25", nil)
-		req.Header.Set("Authorization", "Bearer "+auth(cfg))
+		signRequest(req, nil, cfg)
 		resp, err := client.Do(req)
 		if err != nil {
 			time.Sleep(2 * time.Second)
@@ -360,7 +398,7 @@ func commandLoop(client *http.Client, state *ConfigState, s *Sampler) {
 		if err != nil {
 			continue
 		}
-		res, restart := executeCommand(cmd, s, state.get())
+		res, restart := executeCommand(cmd, s, state)
 		_ = doJSON(client, "POST", cfg.Server+"/api/agent/results", auth(cfg), res, nil)
 		if restart && res.OK {
 			time.Sleep(400 * time.Millisecond)
@@ -369,7 +407,8 @@ func commandLoop(client *http.Client, state *ConfigState, s *Sampler) {
 	}
 }
 
-func executeCommand(cmd AgentCommand, s *Sampler, cfg Config) (AgentResult, bool) {
+func executeCommand(cmd AgentCommand, s *Sampler, state *ConfigState) (AgentResult, bool) {
+	cfg := state.get()
 	r := AgentResult{RequestID: cmd.ID, Action: cmd.Action, OK: true}
 	restart := false
 	marshal := func(v any) {
@@ -392,6 +431,19 @@ func executeCommand(cmd AgentCommand, s *Sampler, cfg Config) (AgentResult, bool
 		return r, false
 	}
 	switch cmd.Action {
+	case "set_report_interval":
+		if cmd.Interval != 2 && cmd.Interval != 5 && cmd.Interval != 10 && cmd.Interval != 30 && cmd.Interval != 60 {
+			r.OK = false
+			r.Error = "unsupported report interval"
+			break
+		}
+		cfg.ReportIntervalSec = cmd.Interval
+		if err := state.set(cfg); err != nil {
+			r.OK = false
+			r.Error = err.Error()
+			break
+		}
+		marshal(map[string]any{"report_interval_sec": cmd.Interval})
 	case "agent_ping":
 		marshal(map[string]any{"pong": true, "version": agentVersion, "protocol": protocolVersion})
 	case "agent_self_check":
@@ -517,32 +569,46 @@ func helperJSON(req HelperRequest, out any, timeout time.Duration) error {
 	return nil
 }
 
-func validateServerURL(raw string, allowInsecure bool) error {
+func validateServerURL(raw string, _ ...bool) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return errors.New("invalid server URL")
 	}
-	if u.Scheme == "https" {
-		return nil
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("only http:// or https:// is allowed")
 	}
-	if u.Scheme != "http" {
-		return errors.New("only https:// is allowed")
+	if u.Scheme == "http" {
+		fmt.Fprintln(os.Stderr, "[WARN] 当前使用 HTTP，首次注册和通信未加密。")
 	}
-	h := u.Hostname()
-	if h == "localhost" {
-		return nil
+	return nil
+}
+
+func enrollmentID(c Config) string {
+	h := sha256.Sum256([]byte(c.Server + "|" + c.Name + "|" + hostnameSafe()))
+	return hex.EncodeToString(h[:16])
+}
+func hostnameSafe() string { h, _ := os.Hostname(); return h }
+
+func signRequest(req *http.Request, body []byte, c Config) {
+	if c.NodeID == "" || c.Secret == "" {
+		return
 	}
-	ip := net.ParseIP(h)
-	if ip != nil && ip.IsLoopback() {
-		return nil
-	}
-	if allowInsecure {
-		return nil
-	}
-	return errors.New("plain HTTP to a remote Server is disabled; configure HTTPS first")
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	nonceBytes := make([]byte, 12)
+	_, _ = cryptorand.Read(nonceBytes)
+	nonce := hex.EncodeToString(nonceBytes)
+	bh := sha256.Sum256(body)
+	msg := req.Method + "\n" + req.URL.RequestURI() + "\n" + ts + "\n" + nonce + "\n" + hex.EncodeToString(bh[:])
+	m := hmac.New(sha256.New, []byte(c.Secret))
+	m.Write([]byte(msg))
+	req.Header.Set("X-Node-ID", c.NodeID)
+	req.Header.Set("X-Timestamp", ts)
+	req.Header.Set("X-Nonce", nonce)
+	req.Header.Set("X-Signature", hex.EncodeToString(m.Sum(nil)))
 }
 
 func auth(c Config) string { return c.NodeID + "." + c.Secret }
+
 func doJSON(client *http.Client, method, url, authorization string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -558,7 +624,10 @@ func doJSON(client *http.Client, method, url, authorization string, in, out any)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if authorization != "" {
-		req.Header.Set("Authorization", "Bearer "+authorization)
+		parts := strings.SplitN(authorization, ".", 2)
+		if len(parts) == 2 {
+			signRequest(req, bodyBytes(in), Config{NodeID: parts[0], Secret: parts[1]})
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -566,14 +635,21 @@ func doJSON(client *http.Client, method, url, authorization string, in, out any)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return decodeAPIError(resp)
 	}
 	if out != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(out)
 	}
 	io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+func bodyBytes(v any) []byte {
+	if v == nil {
+		return nil
+	}
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func loadConfig(path string) (Config, error) {
@@ -589,15 +665,39 @@ func saveConfig(path string, c Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(c, "", "  ")
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0600); err != nil {
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	cerr := f.Close()
+	if err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err = os.Chmod(tmp, 0600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if d, er := os.Open(filepath.Dir(path)); er == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 func fatalf(f string, a ...any) { fmt.Fprintf(os.Stderr, "nodelume-agent: "+f+"\n", a...); os.Exit(1) }
 func fileExists(p string) bool  { _, err := os.Stat(p); return err == nil }

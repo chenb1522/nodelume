@@ -25,10 +25,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-var serverVersion = "1.0.0"
+var serverVersion = "1.0.1"
 var releaseRepo = "chenb1522/nodelume"
 
 const protocolVersion = 1
@@ -40,11 +41,16 @@ var webFS embed.FS
 type PasswordRecord struct{ Salt, Hash string }
 
 type Settings struct {
-	AdminPath      string   `json:"admin_path"`
-	Domain         string   `json:"domain"`
-	HTTPSMode      string   `json:"https_mode"` // off | proxy | builtin
-	TrustedProxies []string `json:"trusted_proxies"`
-	ReleaseRepo    string   `json:"release_repo"`
+	Listen            string   `json:"listen,omitempty"`
+	AdminPath         string   `json:"admin_path"`
+	Domain            string   `json:"domain"`
+	HTTPSMode         string   `json:"https_mode"`                   // off | proxy | builtin
+	CertificateSource string   `json:"certificate_source,omitempty"` // acme | manual
+	TrustedProxies    []string `json:"trusted_proxies"`
+	ReleaseRepo       string   `json:"release_repo"`
+	LogRetentionDays  int      `json:"log_retention_days"`
+	LogMaxMiB         int      `json:"log_max_mib"`
+	ConfigVersion     int      `json:"config_version"`
 }
 
 type SystemInfo struct {
@@ -61,18 +67,32 @@ type SystemInfo struct {
 }
 
 type PersistNode struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Group      string     `json:"group,omitempty"`
-	SecretHash string     `json:"secret_hash,omitempty"`
-	Registered bool       `json:"registered"`
-	CreatedAt  int64      `json:"created_at"`
-	System     SystemInfo `json:"system"`
+	ID                      string     `json:"id"`
+	Name                    string     `json:"name"`
+	Group                   string     `json:"group,omitempty"`
+	Note                    string     `json:"note,omitempty"`
+	ReportIntervalSec       int        `json:"report_interval_sec,omitempty"`
+	SecretHash              string     `json:"secret_hash,omitempty"`  // legacy v1.0.0 bearer auth
+	AgentSecret             string     `json:"agent_secret,omitempty"` // v1.0.1 HMAC key; state file is mode 0600
+	PreviousAgentSecret     string     `json:"previous_agent_secret,omitempty"`
+	PreviousSecretExpiresAt int64      `json:"previous_secret_expires_at,omitempty"`
+	Registered              bool       `json:"registered"`
+	CreatedAt               int64      `json:"created_at"`
+	System                  SystemInfo `json:"system"`
+}
+
+type EnrollmentReceipt struct {
+	NodeID    string `json:"node_id"`
+	Secret    string `json:"secret"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 
 type Enrollment struct {
-	NodeID    string `json:"node_id"`
+	NodeID    string `json:"node_id,omitempty"`
+	Name      string `json:"name,omitempty"`
 	ExpiresAt int64  `json:"expires_at"`
+	Reusable  bool   `json:"reusable,omitempty"`
+	Joined    int    `json:"joined,omitempty"`
 }
 
 type AuditEntry struct {
@@ -85,11 +105,12 @@ type AuditEntry struct {
 }
 
 type PersistedState struct {
-	Password    PasswordRecord          `json:"password"`
-	Settings    Settings                `json:"settings"`
-	Nodes       map[string]*PersistNode `json:"nodes"`
-	Enrollments map[string]Enrollment   `json:"enrollments"`
-	Audit       []AuditEntry            `json:"audit,omitempty"`
+	Password           PasswordRecord               `json:"password"`
+	Settings           Settings                     `json:"settings"`
+	Nodes              map[string]*PersistNode      `json:"nodes"`
+	Enrollments        map[string]Enrollment        `json:"enrollments"`
+	EnrollmentReceipts map[string]EnrollmentReceipt `json:"enrollment_receipts,omitempty"`
+	Audit              []AuditEntry                 `json:"audit,omitempty"`
 }
 
 type ProcessSummary struct {
@@ -130,6 +151,17 @@ type StoppedRecord struct {
 	Note      string `json:"note,omitempty"`
 }
 
+type SelfStats struct {
+	CPUPercent float64 `json:"cpu_percent"`
+	RSSBytes   uint64  `json:"rss_bytes"`
+	DiskBytes  uint64  `json:"disk_bytes"`
+	Inodes     uint64  `json:"inodes"`
+	RXBytes    uint64  `json:"rx_bytes"`
+	TXBytes    uint64  `json:"tx_bytes"`
+	RXRate     float64 `json:"rx_rate"`
+	TXRate     float64 `json:"tx_rate"`
+}
+
 type Heartbeat struct {
 	Time        int64            `json:"time"`
 	CPU         float64          `json:"cpu"`
@@ -150,6 +182,7 @@ type Heartbeat struct {
 	TopCPU      []ProcessSummary `json:"top_cpu"`
 	TopMemory   []ProcessSummary `json:"top_memory"`
 	System      SystemInfo       `json:"system"`
+	Self        SelfStats        `json:"self,omitempty"`
 }
 
 type MetricPoint struct {
@@ -230,6 +263,7 @@ type AgentCommand struct {
 	Version   string `json:"version,omitempty"`
 	RestartID string `json:"restart_id,omitempty"`
 	Unit      string `json:"unit,omitempty"`
+	Interval  int    `json:"interval,omitempty"`
 }
 type AgentResult struct {
 	RequestID string          `json:"request_id"`
@@ -263,15 +297,27 @@ type LoginFail struct {
 }
 
 type App struct {
-	mu                                                                                  sync.RWMutex
-	state                                                                               PersistedState
-	runtime                                                                             map[string]*RuntimeNode
-	sessions                                                                            map[string]Session
-	loginFails                                                                          map[string]LoginFail
-	dataPath, acmeDir, updateRequestPath, updateStatusPath, listen, configuredPublicURL string
-	handler                                                                             http.Handler
-	httpsMu                                                                             sync.Mutex
-	httpsRuntime                                                                        *HTTPSRuntime
+	mu                                                                                                sync.RWMutex
+	state                                                                                             PersistedState
+	runtime                                                                                           map[string]*RuntimeNode
+	sessions                                                                                          map[string]Session
+	loginFails                                                                                        map[string]LoginFail
+	dataPath, acmeDir, updateRequestPath, updateStatusPath, listen, activeListen, configuredPublicURL string
+	handler                                                                                           http.Handler
+	httpsMu                                                                                           sync.Mutex
+	httpsRuntime                                                                                      *HTTPSRuntime
+	noncesMu                                                                                          sync.Mutex
+	nonces                                                                                            map[string]int64
+	logWriter                                                                                         *logWriter
+	httpRX, httpTX                                                                                    atomic.Uint64
+	enrollRateMu                                                                                      sync.Mutex
+	enrollRate                                                                                        map[string][]int64
+	selfMu                                                                                            sync.Mutex
+	selfCache                                                                                         SelfStats
+	selfCacheAt                                                                                       time.Time
+	selfPrevRX                                                                                        uint64
+	selfPrevTX                                                                                        uint64
+	selfPrevAt                                                                                        time.Time
 }
 
 func main() {
@@ -282,6 +328,7 @@ func main() {
 	updateRequest := flag.String("update-request", envOr("NODELUME_UPDATE_REQUEST", "/var/lib/nodelume/update/request.json"), "server update request")
 	updateStatus := flag.String("update-status", envOr("NODELUME_UPDATE_STATUS", "/var/lib/nodelume/update/status.json"), "server update status")
 	showVersion := flag.Bool("version", false, "print version")
+	pickPort := flag.Bool("pick-port", false, "print an unused TCP port and exit")
 	selfCheck := flag.Bool("self-check", false, "validate binary and exit")
 	verifyFile := flag.String("verify-file", "", "verify a release binary")
 	checksums := flag.String("checksums", "", "checksums.txt path")
@@ -294,6 +341,17 @@ func main() {
 	}
 	if *showVersion {
 		fmt.Printf("NodeLume Server v%s (protocol %d)\n", serverVersion, protocolVersion)
+		return
+	}
+	if *pickPort {
+		ln, err := net.Listen("tcp4", "0.0.0.0:0")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		defer ln.Close()
+		_, p, _ := net.SplitHostPort(ln.Addr().String())
+		fmt.Println(p)
 		return
 	}
 	if *selfCheck {
@@ -309,25 +367,53 @@ func main() {
 		return
 	}
 
-	a := &App{dataPath: *data, acmeDir: *acmeDir, updateRequestPath: *updateRequest, updateStatusPath: *updateStatus, listen: *listen, configuredPublicURL: strings.TrimRight(*publicURL, "/"), runtime: map[string]*RuntimeNode{}, sessions: map[string]Session{}, loginFails: map[string]LoginFail{}}
+	a := &App{dataPath: *data, acmeDir: *acmeDir, updateRequestPath: *updateRequest, updateStatusPath: *updateStatus, listen: *listen, activeListen: *listen, configuredPublicURL: strings.TrimRight(*publicURL, "/"), runtime: map[string]*RuntimeNode{}, sessions: map[string]Session{}, loginFails: map[string]LoginFail{}, nonces: map[string]int64{}, enrollRate: map[string][]int64{}}
 	if err := a.load(); err != nil {
 		log.Fatalf("load state: %v", err)
 	}
+	if a.state.Settings.Listen != "" {
+		a.listen = a.state.Settings.Listen
+	} else {
+		a.state.Settings.Listen = a.listen
+		a.mu.Lock()
+		_ = a.saveLocked()
+		a.mu.Unlock()
+	}
+	a.activeListen = a.listen
+	logWriter, logErr := newLogWriter(filepath.Join(filepath.Dir(a.dataPath), "logs"), a.state.Settings.LogRetentionDays, a.state.Settings.LogMaxMiB)
+	if logErr == nil {
+		a.logWriter = logWriter
+		defer logWriter.Close()
+		log.SetOutput(logWriter)
+	}
 	mux := http.NewServeMux()
 	a.routes(mux)
-	a.handler = securityHeaders(a.recoverer(mux))
-	srv := &http.Server{Addr: *listen, Handler: a.handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 65 * time.Second, MaxHeaderBytes: 1 << 20}
+	a.handler = securityHeaders(a.measureHTTP(a.recoverer(mux)))
+	srv := &http.Server{Addr: a.listen, Handler: a.handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 65 * time.Second, MaxHeaderBytes: 1 << 20}
 	go a.maintenance()
-	if a.state.Settings.HTTPSMode == "builtin" && a.state.Settings.Domain != "" {
-		go func() {
-			if err := a.startBuiltinHTTPS(a.state.Settings.Domain); err != nil {
-				log.Printf("built-in HTTPS not started: %v", err)
-			}
-		}()
+	log.Printf("NodeLume Server v%s listening on %s", serverVersion, a.listen)
+	ln, err := net.Listen("tcp", a.listen)
+	if err != nil {
+		log.Fatalf("PORT_IN_USE: listen %s: %v", a.listen, err)
 	}
-	log.Printf("NodeLume Server v%s listening internally on %s", serverVersion, *listen)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	a.mu.RLock()
+	mode, domain := a.state.Settings.HTTPSMode, a.state.Settings.Domain
+	a.mu.RUnlock()
+	var serveErr error
+	if mode == "builtin" && domain != "" {
+		certPath, keyPath := a.certPaths(domain)
+		if _, err := loadTLSCertificate(certPath, keyPath); err == nil {
+			log.Printf("NodeLume built-in HTTPS enabled for %s on %s", domain, a.listen)
+			serveErr = srv.ServeTLS(ln, certPath, keyPath)
+		} else {
+			log.Printf("certificate unavailable for %s; keeping HTTP listener usable: %v", domain, err)
+			serveErr = srv.Serve(ln)
+		}
+	} else {
+		serveErr = srv.Serve(ln)
+	}
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		log.Fatal(serveErr)
 	}
 }
 
@@ -342,15 +428,28 @@ func (a *App) routes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/logout", a.requireAuthCSRF(a.logout))
 	m.HandleFunc("GET /api/session", a.requireAuth(a.sessionInfo))
 	m.HandleFunc("GET /api/settings", a.requireAuth(a.getSettings))
+	m.HandleFunc("GET /api/self/status", a.requireAuth(a.selfStatus))
+	m.HandleFunc("GET /api/settings/listen", a.requireAuth(a.getListenSettings))
+	m.HandleFunc("PATCH /api/settings/listen", a.requireAuthCSRF(a.saveListenSettings))
+	m.HandleFunc("POST /api/server/restart", a.requireAuthCSRF(a.restartServer))
 	m.HandleFunc("POST /api/settings/security", a.requireAuthCSRF(a.saveSecuritySettings))
 	m.HandleFunc("POST /api/settings/password", a.requireAuthCSRF(a.changePassword))
 	m.HandleFunc("POST /api/settings/https/check", a.requireAuthCSRF(a.checkHTTPSSettings))
 	m.HandleFunc("POST /api/settings/https/apply", a.requireAuthCSRF(a.applyHTTPSSettings))
 	m.HandleFunc("POST /api/settings/certificate/check", a.requireAuthCSRF(a.checkCertificate))
+	m.HandleFunc("POST /api/settings/certificate/import", a.requireAuthCSRF(a.importCertificate))
+	m.HandleFunc("POST /api/settings/logs", a.requireAuthCSRF(a.saveLogSettings))
+	m.HandleFunc("GET /api/logs/runtime", a.requireAuth(a.runtimeLogs))
+	m.HandleFunc("GET /api/logs/runtime/stream", a.requireAuth(a.runtimeLogStream))
+	m.HandleFunc("DELETE /api/logs/runtime", a.requireAuthCSRF(a.clearRuntimeLogs))
+	m.HandleFunc("GET /api/enrollment/common", a.requireAuth(a.getCommonEnrollment))
+	m.HandleFunc("POST /api/enrollment/common", a.requireAuthCSRF(a.setCommonEnrollment))
+	m.HandleFunc("DELETE /api/enrollment/common", a.requireAuthCSRF(a.revokeCommonEnrollment))
 	m.HandleFunc("GET /api/audit", a.requireAuth(a.auditLog))
 	m.HandleFunc("GET /api/nodes", a.requireAuth(a.listNodes))
 	m.HandleFunc("POST /api/nodes", a.requireAuthCSRF(a.createNode))
 	m.HandleFunc("DELETE /api/nodes/{id}", a.requireAuthCSRF(a.deleteNode))
+	m.HandleFunc("PATCH /api/nodes/{id}", a.requireAuthCSRF(a.editNode))
 	m.HandleFunc("POST /api/nodes/{id}/reenroll", a.requireAuthCSRF(a.reenrollNode))
 	m.HandleFunc("GET /api/nodes/{id}/history", a.requireAuth(a.nodeHistory))
 	m.HandleFunc("GET /api/nodes/{id}/processes", a.requireAuth(a.nodeProcesses))
@@ -415,7 +514,7 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 func (a *App) load() error {
 	b, err := os.ReadFile(a.dataPath)
 	if errors.Is(err, os.ErrNotExist) {
-		a.state = PersistedState{Settings: Settings{AdminPath: "/", HTTPSMode: "off", ReleaseRepo: releaseRepo}, Nodes: map[string]*PersistNode{}, Enrollments: map[string]Enrollment{}}
+		a.state = PersistedState{Settings: Settings{Listen: a.listen, AdminPath: "/", HTTPSMode: "off", ReleaseRepo: releaseRepo, LogRetentionDays: 7, LogMaxMiB: 50, ConfigVersion: 3}, Nodes: map[string]*PersistNode{}, Enrollments: map[string]Enrollment{}, EnrollmentReceipts: map[string]EnrollmentReceipt{}}
 		return nil
 	}
 	if err != nil {
@@ -430,11 +529,23 @@ func (a *App) load() error {
 	if a.state.Enrollments == nil {
 		a.state.Enrollments = map[string]Enrollment{}
 	}
+	if a.state.EnrollmentReceipts == nil {
+		a.state.EnrollmentReceipts = map[string]EnrollmentReceipt{}
+	}
 	if a.state.Settings.AdminPath == "" {
 		a.state.Settings.AdminPath = "/"
 	}
 	if a.state.Settings.ReleaseRepo == "" {
 		a.state.Settings.ReleaseRepo = releaseRepo
+	}
+	if a.state.Settings.LogRetentionDays <= 0 {
+		a.state.Settings.LogRetentionDays = 7
+	}
+	if a.state.Settings.LogMaxMiB <= 0 {
+		a.state.Settings.LogMaxMiB = 50
+	}
+	if a.state.Settings.ConfigVersion == 0 {
+		a.state.Settings.ConfigVersion = 3
 	}
 	for id := range a.state.Nodes {
 		a.runtime[id] = newRuntimeNode()
@@ -442,18 +553,12 @@ func (a *App) load() error {
 	return nil
 }
 func (a *App) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(a.dataPath), 0700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(a.state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := a.dataPath + ".tmp"
-	if err = os.WriteFile(tmp, b, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.dataPath)
+	b = append(b, '\n')
+	return atomicWrite(a.dataPath, b, 0600)
 }
 func (a *App) auditLocked(ip, action, node, detail, result string) {
 	a.state.Audit = append([]AuditEntry{{Time: time.Now().Unix(), IP: ip, Action: action, Node: node, Detail: detail, Result: result}}, a.state.Audit...)
@@ -471,9 +576,8 @@ func (a *App) audit(ip, action, node, detail, result string) {
 func (a *App) setupStatus(w http.ResponseWriter, r *http.Request) {
 	a.mu.RLock()
 	required := a.state.Password.Hash == ""
-	path := a.state.Settings.AdminPath
 	a.mu.RUnlock()
-	writeJSON(w, 200, map[string]any{"required": required, "admin_path": path, "server_version": serverVersion})
+	writeJSON(w, 200, map[string]any{"required": required, "server_version": serverVersion})
 }
 func (a *App) setupPassword(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -482,8 +586,8 @@ func (a *App) setupPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in, 1<<14) {
 		return
 	}
-	if len(in.Password) < 12 || len(in.Password) > 128 {
-		jsonError(w, "password must be 12-128 characters", 400)
+	if len(in.Password) < 8 || len(in.Password) > 128 {
+		jsonError(w, "password must be 8-128 characters", 400)
 		return
 	}
 	ip := a.remoteIP(r)
@@ -627,8 +731,7 @@ func (a *App) getSettings(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) saveSecuritySettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		AdminPath      string   `json:"admin_path"`
-		TrustedProxies []string `json:"trusted_proxies"`
+		AdminPath string `json:"admin_path"`
 	}
 	if !decodeJSON(w, r, &in, 1<<16) {
 		return
@@ -641,17 +744,14 @@ func (a *App) saveSecuritySettings(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid admin path", 400)
 		return
 	}
-	for _, c := range in.TrustedProxies {
-		if _, _, err := net.ParseCIDR(strings.TrimSpace(c)); err != nil {
-			jsonError(w, "invalid trusted proxy CIDR: "+c, 400)
-			return
-		}
-	}
 	ip := a.remoteIP(r)
 	a.mu.Lock()
+	old := a.state.Settings.AdminPath
 	a.state.Settings.AdminPath = p
-	a.state.Settings.TrustedProxies = cleanStrings(in.TrustedProxies)
-	a.auditLocked(ip, "security_settings", "", "admin path / trusted proxies changed", "success")
+	// Trusted proxy CIDRs are deliberately ignored in v1.0.1 normal configuration.
+	// Only loopback reverse proxies are trusted by remoteIP()/isHTTPS().
+	a.state.Settings.TrustedProxies = nil
+	a.auditLocked(ip, "security_settings", "", fmt.Sprintf("admin path %s -> %s", old, p), "success")
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
@@ -668,8 +768,8 @@ func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in, 1<<14) {
 		return
 	}
-	if len(in.New) < 12 || len(in.New) > 128 {
-		jsonError(w, "new password must be 12-128 characters", 400)
+	if len(in.New) < 8 || len(in.New) > 128 {
+		jsonError(w, "new password must be 8-128 characters", 400)
 		return
 	}
 	ip := a.remoteIP(r)
@@ -702,10 +802,17 @@ func (a *App) auditLog(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 	type V struct {
-		ID, Name, Group, Status string
-		CreatedAt, LastSeen     int64
-		Latest                  Heartbeat  `json:"latest"`
-		System                  SystemInfo `json:"system"`
+		ID                  string     `json:"id"`
+		Name                string     `json:"name"`
+		Group               string     `json:"group"`
+		Note                string     `json:"note"`
+		Status              string     `json:"status"`
+		ReportIntervalSec   int        `json:"report_interval_sec"`
+		OfflineThresholdSec int        `json:"offline_threshold_sec"`
+		CreatedAt           int64      `json:"created_at"`
+		LastSeen            int64      `json:"last_seen"`
+		Latest              Heartbeat  `json:"latest"`
+		System              SystemInfo `json:"system"`
 	}
 	a.mu.RLock()
 	out := make([]V, 0, len(a.state.Nodes))
@@ -721,31 +828,24 @@ func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 			latest = rt.Latest
 			if !rt.LastSeen.IsZero() {
 				last = rt.LastSeen.Unix()
-				if time.Since(rt.LastSeen) < 30*time.Second {
+				if nodeIsOnline(n, rt) {
 					status = "online"
 				}
 			}
 		}
-		out = append(out, V{ID: id, Name: n.Name, Group: n.Group, Status: status, CreatedAt: n.CreatedAt, LastSeen: last, Latest: latest, System: n.System})
+		out = append(out, V{ID: id, Name: n.Name, Group: n.Group, Note: n.Note, Status: status, ReportIntervalSec: n.ReportIntervalSec, OfflineThresholdSec: int(nodeOfflineThreshold(n) / time.Second), CreatedAt: n.CreatedAt, LastSeen: last, Latest: latest, System: n.System})
 	}
 	a.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	writeJSON(w, 200, out)
 }
 func (a *App) enrollmentBaseURL(r *http.Request) (string, error) {
-	base := a.baseURL(r)
+	base := strings.TrimRight(a.baseURL(r), "/")
 	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", errors.New("invalid public Server URL")
 	}
-	if u.Scheme == "https" {
-		return strings.TrimRight(base, "/"), nil
-	}
-	h := u.Hostname()
-	if u.Scheme == "http" && (h == "localhost" || (net.ParseIP(h) != nil && net.ParseIP(h).IsLoopback())) {
-		return strings.TrimRight(base, "/"), nil
-	}
-	return "", errors.New("remote Agent enrollment requires HTTPS; configure Domain/HTTPS or a trusted HTTPS reverse proxy first")
+	return base, nil
 }
 
 func (a *App) createNode(w http.ResponseWriter, r *http.Request) {
@@ -758,11 +858,14 @@ func (a *App) createNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Name = strings.TrimSpace(in.Name)
-	if len(in.Name) < 1 || len(in.Name) > 80 {
-		jsonError(w, "name must be 1-80 characters", 400)
+	if len(in.Name) > 80 {
+		jsonError(w, "name must be at most 80 characters", 400)
 		return
 	}
 	id := randomHex(12)
+	if in.Name == "" {
+		in.Name = "node-" + id[:6]
+	}
 	token := randomToken(32)
 	th := hashString(token)
 	ip := a.remoteIP(r)
@@ -958,7 +1061,8 @@ func (a *App) nodeName(id string) string {
 func (a *App) sendCommand(nodeID, action string, cmd AgentCommand, timeout time.Duration) (AgentResult, error) {
 	a.mu.RLock()
 	rt := a.runtime[nodeID]
-	online := rt != nil && !rt.LastSeen.IsZero() && time.Since(rt.LastSeen) < 30*time.Second
+	n := a.state.Nodes[nodeID]
+	online := n != nil && nodeIsOnline(n, rt)
 	a.mu.RUnlock()
 	if rt == nil {
 		return AgentResult{}, errors.New("node not found")
@@ -989,49 +1093,141 @@ func (a *App) sendCommand(nodeID, action string, cmd AgentCommand, timeout time.
 }
 
 func (a *App) agentRegister(w http.ResponseWriter, r *http.Request) {
+	if !a.allowEnrollment(a.remoteIP(r)) {
+		jsonErrorCode(w, "ENROLLMENT_RATE_LIMITED", "首次注册请求过于频繁", "请稍后重试", http.StatusTooManyRequests)
+		return
+	}
 	var in struct {
-		Token  string     `json:"token"`
-		System SystemInfo `json:"system"`
+		Token        string     `json:"token"`
+		Name         string     `json:"name,omitempty"`
+		EnrollmentID string     `json:"enrollment_id,omitempty"`
+		AgentVersion string     `json:"agent_version,omitempty"`
+		Protocol     int        `json:"protocol"`
+		System       SystemInfo `json:"system"`
 	}
 	if !decodeJSON(w, r, &in, 1<<20) {
 		return
 	}
-	th := hashString(in.Token)
-	a.mu.Lock()
-	e, ok := a.state.Enrollments[th]
-	if !ok || time.Now().Unix() > e.ExpiresAt {
-		a.mu.Unlock()
-		jsonError(w, "invalid or expired enrollment token", 401)
+	if in.Protocol == 0 {
+		jsonErrorCode(w, "MISSING_PROTOCOL_VERSION", "Agent 未提供 Protocol 版本", "请升级 NodeLume Agent", http.StatusUpgradeRequired)
 		return
 	}
-	n := a.state.Nodes[e.NodeID]
-	if n == nil {
-		delete(a.state.Enrollments, th)
-		a.mu.Unlock()
-		jsonError(w, "node not found", 404)
+	if in.Protocol < protocolVersion {
+		jsonErrorCode(w, "AGENT_PROTOCOL_TOO_OLD", fmt.Sprintf("Agent Protocol %d 低于 Server 支持版本 %d", in.Protocol, protocolVersion), "请升级 NodeLume Agent", http.StatusUpgradeRequired)
 		return
+	}
+	if in.Protocol > protocolVersion {
+		jsonErrorCode(w, "SERVER_PROTOCOL_TOO_OLD", fmt.Sprintf("Agent Protocol %d 高于 Server 支持版本 %d", in.Protocol, protocolVersion), "请升级 NodeLume Server", http.StatusUpgradeRequired)
+		return
+	}
+	in.Token = strings.TrimSpace(in.Token)
+	if in.Token == "" {
+		jsonErrorCode(w, "INVALID_ENROLLMENT_TOKEN", "Enrollment Token 不能为空", "请重新生成接入 Token", 401)
+		return
+	}
+	now := time.Now().Unix()
+	receiptKey := ""
+	if strings.TrimSpace(in.EnrollmentID) != "" {
+		receiptKey = hashString(in.Token + "|" + strings.TrimSpace(in.EnrollmentID))
+	}
+	a.mu.Lock()
+	// Idempotency first: a retry after the original response was lost receives the same identity.
+	if receiptKey != "" {
+		if rec, ok := a.state.EnrollmentReceipts[receiptKey]; ok && rec.ExpiresAt > now {
+			if n := a.state.Nodes[rec.NodeID]; n != nil {
+				a.mu.Unlock()
+				writeJSON(w, 200, map[string]any{"node_id": rec.NodeID, "secret": rec.Secret, "server_version": serverVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": n.ReportIntervalSec})
+				return
+			}
+		}
+	}
+	th := hashString(in.Token)
+	e, ok := a.state.Enrollments[th]
+	if !ok || (e.ExpiresAt > 0 && now > e.ExpiresAt) {
+		a.mu.Unlock()
+		jsonErrorCode(w, "INVALID_ENROLLMENT_TOKEN", "Enrollment Token 无效或已过期", "请在 Web 中重新生成接入 Token", 401)
+		return
+	}
+	var n *PersistNode
+	if e.Reusable {
+		id := randomHex(12)
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			name = strings.TrimSpace(e.Name)
+		}
+		if name == "" {
+			name = "node-" + id[:6]
+		}
+		n = &PersistNode{ID: id, Name: name, Group: "默认分组", ReportIntervalSec: 2, CreatedAt: now}
+		a.state.Nodes[id] = n
+		a.runtime[id] = newRuntimeNode()
+		e.Joined++
+		a.state.Enrollments[th] = e
+	} else {
+		n = a.state.Nodes[e.NodeID]
+		if n == nil {
+			delete(a.state.Enrollments, th)
+			a.mu.Unlock()
+			jsonErrorCode(w, "NODE_NOT_FOUND", "指定节点不存在", "请重新创建接入 Token", 404)
+			return
+		}
 	}
 	secret := randomToken(32)
+	if n.Registered && n.AgentSecret != "" {
+		n.PreviousAgentSecret = n.AgentSecret
+		n.PreviousSecretExpiresAt = time.Now().Add(5 * time.Minute).Unix()
+	}
 	n.SecretHash = hashString(secret)
+	n.AgentSecret = secret
+	if strings.TrimSpace(in.Name) != "" {
+		n.Name = strings.TrimSpace(in.Name)
+	}
 	n.Registered = true
 	n.System = in.System
-	delete(a.state.Enrollments, th)
+	n.System.Protocol = in.Protocol
+	if in.AgentVersion != "" {
+		n.System.Agent = strings.TrimPrefix(strings.TrimSpace(in.AgentVersion), "v")
+	}
+	if n.ReportIntervalSec == 0 {
+		n.ReportIntervalSec = 2
+	}
+	if !e.Reusable {
+		delete(a.state.Enrollments, th)
+	}
 	if a.runtime[n.ID] == nil {
 		a.runtime[n.ID] = newRuntimeNode()
 	}
-	a.auditLocked(remoteIPRaw(r), "agent_register", n.Name, in.System.OS+" / "+in.System.Arch, "success")
+	if receiptKey != "" {
+		a.state.EnrollmentReceipts[receiptKey] = EnrollmentReceipt{NodeID: n.ID, Secret: secret, ExpiresAt: time.Now().Add(10 * time.Minute).Unix()}
+	}
+	a.auditLocked(a.remoteIP(r), "agent_register", n.Name, in.System.OS+" / "+in.System.Arch, "success")
 	err := a.saveLocked()
+	id, interval := n.ID, n.ReportIntervalSec
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonErrorCode(w, "IDENTITY_SAVE_FAILED", "Server 无法保存 Agent 身份", "请检查 Server 数据目录权限和磁盘空间", 500)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"node_id": n.ID, "secret": secret})
+	writeJSON(w, 200, map[string]any{"node_id": id, "secret": secret, "server_version": serverVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": interval})
 }
 func (a *App) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
-	id, ok := a.authAgent(r)
-	if !ok {
-		jsonError(w, "unauthorized", 401)
+	id, authFail := a.authAgentDetailed(r)
+	if authFail != nil {
+		jsonErrorCode(w, authFail.Code, authFail.Reason, authFail.Action, authFail.Status)
+		return
+	}
+	a.mu.RLock()
+	registeredProtocol := 0
+	if n := a.state.Nodes[id]; n != nil {
+		registeredProtocol = n.System.Protocol
+	}
+	a.mu.RUnlock()
+	if registeredProtocol > 0 && registeredProtocol < protocolVersion {
+		jsonErrorCode(w, "AGENT_PROTOCOL_TOO_OLD", "Agent Protocol 与 Server 不兼容", "请升级 Agent", http.StatusUpgradeRequired)
+		return
+	}
+	if registeredProtocol > protocolVersion {
+		jsonErrorCode(w, "SERVER_PROTOCOL_TOO_OLD", "Agent Protocol 高于 Server 支持版本", "请升级 Server", http.StatusUpgradeRequired)
 		return
 	}
 	var hb Heartbeat
@@ -1063,13 +1259,17 @@ func (a *App) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		n.System = hb.System
 	}
 	desired := a.desiredAgentURLLocked()
+	interval := 2
+	if n := a.state.Nodes[id]; n != nil && n.ReportIntervalSec > 0 {
+		interval = n.ReportIntervalSec
+	}
 	a.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"ok": true, "server_url": desired, "server_protocol": protocolVersion})
+	writeJSON(w, 200, map[string]any{"ok": true, "server_url": desired, "server_protocol": protocolVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": interval})
 }
 func (a *App) agentCommands(w http.ResponseWriter, r *http.Request) {
-	id, ok := a.authAgent(r)
-	if !ok {
-		jsonError(w, "unauthorized", 401)
+	id, authFail := a.authAgentDetailed(r)
+	if authFail != nil {
+		jsonErrorCode(w, authFail.Code, authFail.Reason, authFail.Action, authFail.Status)
 		return
 	}
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
@@ -1093,9 +1293,9 @@ func (a *App) agentCommands(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func (a *App) agentResults(w http.ResponseWriter, r *http.Request) {
-	id, ok := a.authAgent(r)
-	if !ok {
-		jsonError(w, "unauthorized", 401)
+	id, authFail := a.authAgentDetailed(r)
+	if authFail != nil {
+		jsonErrorCode(w, authFail.Code, authFail.Reason, authFail.Action, authFail.Status)
 		return
 	}
 	var res AgentResult
@@ -1122,36 +1322,25 @@ func (a *App) agentResults(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
-func (a *App) authAgent(r *http.Request) (string, bool) {
-	v := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	i := strings.IndexByte(v, '.')
-	if i <= 0 {
-		return "", false
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
 	}
-	id, secret := v[:i], v[i+1:]
-	if len(secret) < 20 {
-		return "", false
-	}
-	a.mu.RLock()
-	n := a.state.Nodes[id]
-	a.mu.RUnlock()
-	if n == nil || !n.Registered || n.SecretHash == "" {
-		return "", false
-	}
-	got := hashString(secret)
-	return id, subtle.ConstantTimeCompare([]byte(got), []byte(n.SecretHash)) == 1
+	return v
 }
+
 func (a *App) desiredAgentURLLocked() string {
 	if a.state.Settings.Domain != "" && (a.state.Settings.HTTPSMode == "builtin" || a.state.Settings.HTTPSMode == "proxy") {
-		return "https://" + a.state.Settings.Domain
+		return domainAccessURL(a.state.Settings.Domain, a.activeListen)
 	}
 	return a.configuredPublicURL
 }
 
 func (a *App) maintenance() {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for now := range t.C {
+		a.writeRuntimeStatus()
 		cut := now.Add(-time.Hour).Unix()
 		a.mu.Lock()
 		for _, rt := range a.runtime {
@@ -1159,8 +1348,21 @@ func (a *App) maintenance() {
 		}
 		dirty := false
 		for k, e := range a.state.Enrollments {
-			if now.Unix() > e.ExpiresAt {
+			if e.ExpiresAt > 0 && now.Unix() > e.ExpiresAt {
 				delete(a.state.Enrollments, k)
+				dirty = true
+			}
+		}
+		for k, rec := range a.state.EnrollmentReceipts {
+			if now.Unix() > rec.ExpiresAt {
+				delete(a.state.EnrollmentReceipts, k)
+				dirty = true
+			}
+		}
+		for _, n := range a.state.Nodes {
+			if n.PreviousAgentSecret != "" && n.PreviousSecretExpiresAt > 0 && now.Unix() > n.PreviousSecretExpiresAt {
+				n.PreviousAgentSecret = ""
+				n.PreviousSecretExpiresAt = 0
 				dirty = true
 			}
 		}
@@ -1184,7 +1386,7 @@ func (a *App) baseURL(r *http.Request) string {
 	domain, mode := a.state.Settings.Domain, a.state.Settings.HTTPSMode
 	a.mu.RUnlock()
 	if domain != "" && (mode == "builtin" || mode == "proxy") {
-		return "https://" + domain
+		return domainAccessURL(domain, a.activeListen)
 	}
 	if a.configuredPublicURL != "" {
 		return a.configuredPublicURL
@@ -1206,16 +1408,14 @@ func (a *App) agentInstallCommand(r *http.Request, token string) string {
 	if !validRepo(repo) {
 		repo = releaseRepo
 	}
-	raw := "https://raw.githubusercontent.com/" + repo + "/v" + serverVersion + "/scripts/install-agent.sh"
+	raw := "https://github.com/" + repo + "/releases/download/v" + serverVersion + "/install-agent.sh"
 	return fmt.Sprintf("curl -fsSL %s | sh -s -- --server %s --token %s --version v%s --repo %s", shellQuote(raw), shellQuote(base), shellQuote(token), serverVersion, shellQuote(repo))
 }
 
 func (a *App) remoteIP(r *http.Request) string {
 	peer := remoteIPRaw(r)
-	a.mu.RLock()
-	cidrs := append([]string(nil), a.state.Settings.TrustedProxies...)
-	a.mu.RUnlock()
-	if !ipInCIDRs(peer, cidrs) {
+	p := net.ParseIP(peer)
+	if p == nil || !p.IsLoopback() {
 		return peer
 	}
 	if x := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); net.ParseIP(x) != nil {
@@ -1230,11 +1430,8 @@ func (a *App) isHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	peer := remoteIPRaw(r)
-	a.mu.RLock()
-	cidrs := append([]string(nil), a.state.Settings.TrustedProxies...)
-	a.mu.RUnlock()
-	return ipInCIDRs(peer, cidrs) && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
+	p := net.ParseIP(remoteIPRaw(r))
+	return p != nil && p.IsLoopback() && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -1281,6 +1478,9 @@ func writeRawJSON(w http.ResponseWriter, status int, b []byte) {
 }
 func jsonError(w http.ResponseWriter, msg string, status int) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+func jsonErrorCode(w http.ResponseWriter, code, reason, action string, status int) {
+	writeJSON(w, status, map[string]string{"code": code, "reason": reason, "action": action})
 }
 func hashString(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
 func randomToken(n int) string {
@@ -1416,17 +1616,39 @@ func minInt(a, b int) int {
 }
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 func atomicWrite(path string, b []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, mode); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, mode); err != nil {
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err = os.Chmod(tmp, mode); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if d, er := os.Open(dir); er == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 func withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, d)
@@ -1444,4 +1666,221 @@ func randomHex(n int) string {
 		return fmt.Sprintf("%x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+func (a *App) editNode(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var in struct {
+		Name, Group, Note string
+		ReportIntervalSec int `json:"report_interval_sec"`
+	}
+	if !decodeJSON(w, r, &in, 1<<16) {
+		return
+	}
+	in.Name, in.Group, in.Note = strings.TrimSpace(in.Name), strings.TrimSpace(in.Group), strings.TrimSpace(in.Note)
+	if in.Name == "" || len(in.Name) > 80 || len(in.Group) > 64 || len(in.Note) > 300 {
+		jsonError(w, "invalid node metadata", 400)
+		return
+	}
+	if in.ReportIntervalSec == 0 {
+		in.ReportIntervalSec = 2
+	}
+	allowed := map[int]bool{2: true, 5: true, 10: true, 30: true, 60: true}
+	if !allowed[in.ReportIntervalSec] {
+		jsonError(w, "unsupported report interval", 400)
+		return
+	}
+	a.mu.RLock()
+	n := a.state.Nodes[id]
+	a.mu.RUnlock()
+	if n == nil {
+		jsonError(w, "node not found", 404)
+		return
+	}
+	applied := true
+	a.mu.RLock()
+	rt := a.runtime[id]
+	online := nodeIsOnline(n, rt)
+	a.mu.RUnlock()
+	if n.Registered && n.ReportIntervalSec != in.ReportIntervalSec && online {
+		res, err := a.sendCommand(id, "set_report_interval", AgentCommand{Interval: in.ReportIntervalSec}, 10*time.Second)
+		if err != nil || !res.OK {
+			if err != nil {
+				jsonError(w, err.Error(), 409)
+			} else {
+				jsonError(w, res.Error, 409)
+			}
+			return
+		}
+	} else if n.Registered && n.ReportIntervalSec != in.ReportIntervalSec {
+		applied = false
+	}
+	a.mu.Lock()
+	n = a.state.Nodes[id]
+	old := n.Name
+	n.Name = in.Name
+	n.Group = in.Group
+	n.Note = in.Note
+	n.ReportIntervalSec = in.ReportIntervalSec
+	a.auditLocked(a.remoteIP(r), "edit_node", n.Name, fmt.Sprintf("%s -> %s; report %ds", old, n.Name, in.ReportIntervalSec), "success")
+	err := a.saveLocked()
+	a.mu.Unlock()
+	if err != nil {
+		jsonError(w, "save failed", 500)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "applied": applied, "pending": !applied})
+}
+
+func (a *App) commonEnrollmentLocked() (string, Enrollment, bool) {
+	for h, e := range a.state.Enrollments {
+		if e.Reusable {
+			return h, e, true
+		}
+	}
+	return "", Enrollment{}, false
+}
+func (a *App) getCommonEnrollment(w http.ResponseWriter, r *http.Request) {
+	a.mu.RLock()
+	_, e, ok := a.commonEnrollmentLocked()
+	a.mu.RUnlock()
+	now := time.Now().Unix()
+	active := ok && (e.ExpiresAt == 0 || e.ExpiresAt > now)
+	writeJSON(w, 200, map[string]any{"active": active, "expires_at": e.ExpiresAt, "joined": e.Joined})
+}
+func (a *App) setCommonEnrollment(w http.ResponseWriter, r *http.Request) {
+	if _, err := a.enrollmentBaseURL(r); err != nil {
+		jsonError(w, err.Error(), 409)
+		return
+	}
+	var in struct {
+		Days int    `json:"days"`
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &in, 1<<16) {
+		return
+	}
+	if in.Days != 0 && in.Days != 1 && in.Days != 7 && in.Days != 30 {
+		jsonError(w, "days must be 0, 1, 7, or 30", 400)
+		return
+	}
+	token := randomToken(32)
+	exp := int64(0)
+	if in.Days > 0 {
+		exp = time.Now().Add(time.Duration(in.Days) * 24 * time.Hour).Unix()
+	}
+	a.mu.Lock()
+	for h, e := range a.state.Enrollments {
+		if e.Reusable {
+			delete(a.state.Enrollments, h)
+		}
+	}
+	a.state.Enrollments[hashString(token)] = Enrollment{Name: strings.TrimSpace(in.Name), ExpiresAt: exp, Reusable: true}
+	a.auditLocked(a.remoteIP(r), "common_enrollment", "", "common enrollment token generated", "success")
+	err := a.saveLocked()
+	a.mu.Unlock()
+	if err != nil {
+		jsonError(w, "save failed", 500)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"token": token, "expires_at": exp, "install_command": a.agentInstallCommand(r, token)})
+}
+func (a *App) revokeCommonEnrollment(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	for h, e := range a.state.Enrollments {
+		if e.Reusable {
+			delete(a.state.Enrollments, h)
+		}
+	}
+	a.auditLocked(a.remoteIP(r), "common_enrollment", "", "common enrollment token revoked", "success")
+	err := a.saveLocked()
+	a.mu.Unlock()
+	if err != nil {
+		jsonError(w, "save failed", 500)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (a *App) saveLogSettings(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		RetentionDays int `json:"retention_days"`
+		MaxMiB        int `json:"max_mib"`
+	}
+	if !decodeJSON(w, r, &in, 1<<16) {
+		return
+	}
+	days := map[int]bool{1: true, 3: true, 7: true, 14: true, 30: true}
+	caps := map[int]bool{10: true, 25: true, 50: true, 100: true, 200: true, 500: true}
+	if !days[in.RetentionDays] || !caps[in.MaxMiB] {
+		jsonError(w, "unsupported log settings", 400)
+		return
+	}
+	a.mu.Lock()
+	a.state.Settings.LogRetentionDays = in.RetentionDays
+	a.state.Settings.LogMaxMiB = in.MaxMiB
+	a.auditLocked(a.remoteIP(r), "log_settings", "", fmt.Sprintf("%d days / %d MiB", in.RetentionDays, in.MaxMiB), "success")
+	err := a.saveLocked()
+	a.mu.Unlock()
+	if a.logWriter != nil {
+		a.logWriter.Configure(in.RetentionDays, in.MaxMiB)
+	}
+	if err != nil {
+		jsonError(w, "save failed", 500)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+func (a *App) runtimeLogs(w http.ResponseWriter, r *http.Request) {
+	if a.logWriter == nil {
+		writeJSON(w, 200, map[string]any{"text": "", "bytes": 0})
+		return
+	}
+	text, n, err := a.logWriter.Tail(256 << 10)
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"text": text, "bytes": n})
+}
+func (a *App) runtimeLogStream(w http.ResponseWriter, r *http.Request) {
+	if a.logWriter == nil {
+		jsonError(w, "runtime log unavailable", 503)
+		return
+	}
+	f, ok := w.(http.Flusher)
+	if !ok {
+		jsonError(w, "streaming unavailable", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	ch, cancel := a.logWriter.Subscribe()
+	defer cancel()
+	_, _ = io.WriteString(w, "event: ready\ndata: ok\n\n")
+	f.Flush()
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				return
+			}
+			b, _ := json.Marshal(line)
+			_, _ = fmt.Fprintf(w, "event: log\ndata: %s\n\n", b)
+			f.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+func (a *App) clearRuntimeLogs(w http.ResponseWriter, r *http.Request) {
+	if a.logWriter != nil {
+		if err := a.logWriter.Clear(); err != nil {
+			jsonError(w, err.Error(), 500)
+			return
+		}
+	}
+	a.audit(a.remoteIP(r), "clear_runtime_logs", "", "server runtime logs cleared", "success")
+	writeJSON(w, 200, map[string]any{"ok": true})
 }

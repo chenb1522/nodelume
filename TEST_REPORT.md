@@ -1,68 +1,94 @@
-# NodeLume v1.0.0 Test Report
+# NodeLume v1.0.1 Final Test Report
 
-The following checks were run against the v1.0.0 source before final packaging.
+本报告只记录本次最终打包前实际执行的测试，不把未运行的环境写成“已通过”。
 
-## Build / static validation
+## 1. 编译与静态检查
 
-- `gofmt` completed.
-- `go test ./...` passed.
-- `go vet ./...` passed.
-- `go test -race ./server ./agent` passed.
-- JavaScript syntax (`node --check`) passed.
-- HTML parser validation passed.
-- All six shell scripts pass `sh -n`.
-- Server and Agent `--version` / `--self-check` passed.
-- Linux amd64 binaries were confirmed statically linked; final release also cross-builds static arm64 binaries.
-- Agent source review confirms no remote shell / arbitrary command action; privileged command execution is fixed to explicitly coded operations.
+实际执行并通过：
 
-## Live Server + Agent integration
+- `gofmt`
+- `go test ./...`
+- `go vet ./...`
+- `go test -race ./...`
+- `bash -n scripts/install-server.sh scripts/install-agent.sh scripts/nlm`
+- `node --check server/web/app.js`
+- Linux amd64 Server / Agent / verifier 静态编译
+- Linux arm64 Server / Agent / verifier 静态交叉编译
+- amd64 Server / Agent `--self-check`
+- amd64/arm64 ELF 架构检查
+- verifier SHA256 与安装器固定 pin 一致性检查
 
-A real local Server, low-level helper socket and Agent process were launched and exercised through HTTP APIs (loopback HTTP was enabled only for isolated testing):
+## 2. 真实 Server + Agent 端到端测试
 
-- first administrator password setup and login passed;
-- state-changing API without CSRF returned 403;
-- custom administrator entry path passed; old `/` returned 404;
-- trusted-proxy source IP handling passed;
-- three failed logins returned 1/3, 2/3 and ban; the correct password remained blocked for that IP;
-- Server restart cleared the in-memory IP ban;
-- password change revoked the active session; old password failed and new password succeeded;
-- node creation and one-time enrollment passed;
-- Agent registration, independent Agent secret, heartbeat and online state passed;
-- enrollment-token replay was rejected;
-- remote non-loopback plain HTTP Agent configuration was rejected unless the explicit test override was supplied;
-- CPU/memory/disk/system metrics and 5-second history were returned;
-- disk detail API passed;
-- an undefined `/api/exec` endpoint was not available;
-- PID 1 was rejected;
-- the running NodeLume Agent was detected as protected and termination was rejected;
-- a disposable direct `sleep` process was inspected, SIGTERM-terminated through the fixed protocol, confirmed exited (including zombie/reap semantics), retained as a local recovery record and started again with a new PID;
-- a second disposable direct process was restarted through `process_restart`, producing a new PID;
-- recovery snapshots are persisted before destructive recoverable actions; if persistence fails the destructive action is refused;
-- common secret-bearing command arguments and URL credentials are redacted from UI command lines and disable persistent direct-restart snapshots;
-- audit records included node creation and process control operations.
+使用本次源码重新编译出的 amd64 二进制，使用独立临时数据目录实际启动：
 
-## Agent update tests
+- `/healthz` 正常；
+- 未初始化 `/api/setup/status` 正常；
+- 首次管理员密码初始化成功；
+- 错误密码拒绝；
+- 正确密码登录并获取 CSRF；
+- 未认证访问节点 API 返回 401；
+- 通用 Enrollment Token 创建成功；
+- 一次性 Enrollment Token 创建成功；
+- `nodelume-agent bind` 使用 HTTP 实际绑定成功并显示明文风险警告；
+- Agent 配置实际写入 Node ID + Agent Secret，Enrollment Token 不再持久保留；
+- 实际启动 Agent 后 Server 节点状态变为 `online`；
+- Agent 实际上报 CPU/内存/磁盘/进程等数据。
 
-- A signed v1.0.1 Agent test release was served from an isolated local release endpoint.
-- Web `agent_upgrade` command installed the signed Agent, caused the old Agent to exit, retained `.previous` + pending state, then a simulated systemd restart launched v1.0.1.
-- The first successful heartbeat to a Server speaking protocol v1 committed the update; pending state and previous binary were removed.
-- A tampered Agent artifact with unchanged signed metadata was rejected in prior update-path validation.
-- A correctly signed intentionally broken Agent whose `--self-check` passed but normal startup failed was installed as pending; the helper watchdog automatically restored v1.0.0 when no healthy reconnect committed the update.
+## 3. HMAC / 重放 / 时钟偏差
 
-## Server update tests
+使用真实 Enrollment 后签发的 Node ID + Agent Secret 发起请求：
 
-- A correctly signed v1.0.1 Server replacement updated v1.0.0 successfully and passed HTTP `/healthz` validation.
-- A correctly signed intentionally non-starting Server replacement passed its synthetic self-check but failed startup; the updater restored v1.0.0 and `/healthz` returned healthy again.
-- Update status recorded `success` or `rolled_back` as appropriate.
+- 正确 HMAC 请求成功；
+- 同 Node ID + Nonce 重复请求返回 `REPLAY_DETECTED`；
+- 时间偏差超过 60 秒返回 `CLOCK_SKEW`；
+- Nonce 缓存实现包含过期和容量上限。
 
-## Release bootstrap verification
+## 4. Agent 配置事务
 
-- First-install trust is pinned by the public Ed25519 key embedded in the installer.
-- Installer verification uses OpenSSL Ed25519 verification on `checksums.txt` before executing the downloaded NodeLume binary, then checks the binary SHA-256 and NodeLume self-check.
-- This avoids trusting a newly downloaded binary to establish its own first-install trust.
+实际测试：
 
-## Not falsely claimed as locally end-to-end tested
+- `agent set -s` 指向不可达 Server 时返回失败，原配置逐字节保持不变；
+- `agent bind` 指向不可达 Server 时返回失败，原绑定逐字节保持不变。
 
-- A real public ACME certificate issuance/renewal was not possible in the isolated build environment because it requires a real DNS name and inbound public ports 80/443. ACME directory/order/challenge/certificate persistence and renewal paths are implemented, but the final public-CA challenge must be smoke-tested on the deployment domain.
-- The supplied systemd installers were not boot-tested on separate real Debian, Ubuntu, CentOS Stream, AlmaLinux and Rocky Linux VMs in this container environment. The runtime collector avoids distro-specific tools, and the final release contains static amd64/arm64 binaries, but production smoke testing on one representative VPS is recommended before rolling out broadly.
-- The build environment's Chromium policy blocked loopback browser navigation, so the final split Web assets were syntax/DOM validated rather than falsely claiming a new automated browser run. The responsive interaction design itself is the user-approved UI iteration carried into these assets.
+## 5. 日志文件句柄
+
+增加并实际运行日志 Writer 回归测试：
+
+- Clear 时先关闭/切换 active 日志，再删除关闭的历史文件；
+- 清除完成后继续向新的 `server.log` 写入；
+- 大小触发 rotate 后新的 active 句柄继续可写；
+- 当前 active 日志不会被历史容量清理误删。
+
+## 6. 真实 Chromium UI 交互
+
+最终源码通过真实 Chromium + DevTools Protocol 访问实际运行的 NodeLume Server。环境的 Chromium 原本由 URLBlocklist 禁止本地导航；测试时仅临时移除该策略，浏览器启动/测试完成后立即恢复系统策略。
+
+22 项 UI 检查全部通过（0 failed）：
+
+- 页面实际加载；
+- 未认证时后台完全隐藏；
+- 登录页不显示安全入口路径；
+- 错误密码后仍保持锁定；
+- 正确密码后才解锁；
+- 真实 Agent 节点卡片从后端加载；
+- 4 个自定义下拉组件实际生成；
+- 设置窗口可打开；
+- 监听未修改时保存按钮禁用；
+- 修改监听后保存按钮启用；
+- 改回原值后再次禁用；
+- 通用 Token “有效期”自定义下拉位置/宽度正常；
+- 节点详情可打开；
+- Agent 自身 CPU/内存/磁盘/Inodes/RX/TX DOM 完整；
+- 每次节点详情默认进入“概览”；
+- 320 / 360 / 390 / 768 / 1280 px 均无页面横向溢出；
+- 测试期间无未捕获 JavaScript 异常。
+
+## 7. 未冒充实测的项目
+
+当前环境无法等价替代以下真实外部条件，因此不标记为实机通过：
+
+- Let's Encrypt 等真实公网 CA + 公网 DNS + 入站 TCP/80 的实际 HTTP-01 签发/续期；
+- Debian、Ubuntu、CentOS 7/Stream、AlmaLinux、Rocky Linux 多台真实 systemd VPS 的完整安装/重启/升级；
+- ARM64 真机执行（已完成静态交叉编译和 ELF 架构检查）；
+- 长时间真实公网弱网、丢包、NAT 运行。
