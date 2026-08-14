@@ -36,18 +36,27 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.agentVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-agent-linux-$ARCH" ./agent
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w" -o "dist/nodelume-verify-linux-$ARCH" ./tools/verify
           done
-          # The first-install verifier is trusted by SHA-256 pins embedded in both installers.
-          # Refuse a release if the verifier bits changed unexpectedly.
-          WANT_AMD64=$(sed -n "s/^VERIFIER_SHA_AMD64='\([^']*\)'.*/\1/p" scripts/install-server.sh)
-          WANT_ARM64=$(sed -n "s/^VERIFIER_SHA_ARM64='\([^']*\)'.*/\1/p" scripts/install-server.sh)
-          GOT_AMD64=$(sha256sum dist/nodelume-verify-linux-amd64 | awk '{print $1}')
-          GOT_ARM64=$(sha256sum dist/nodelume-verify-linux-arm64 | awk '{print $1}')
-          test "$WANT_AMD64" = "$GOT_AMD64" || { echo "amd64 verifier bootstrap pin mismatch" >&2; exit 1; }
-          test "$WANT_ARM64" = "$GOT_ARM64" || { echo "arm64 verifier bootstrap pin mismatch" >&2; exit 1; }
-          grep -q "$WANT_AMD64" scripts/install-agent.sh || { echo "agent amd64 verifier pin mismatch" >&2; exit 1; }
-          grep -q "$WANT_ARM64" scripts/install-agent.sh || { echo "agent arm64 verifier pin mismatch" >&2; exit 1; }
-          cp release.pub dist/release.pub
-          cp scripts/install-server.sh scripts/install-agent.sh scripts/nlm dist/
+          # Build-time pinning of the verifier SHA-256 into Release installers.
+            GOT_AMD64=$(sha256sum dist/nodelume-verify-linux-amd64 | awk '{print $1}')
+            GOT_ARM64=$(sha256sum dist/nodelume-verify-linux-arm64 | awk '{print $1}')
+            
+            cp release.pub dist/release.pub
+            cp scripts/install-server.sh scripts/install-agent.sh scripts/nlm dist/
+            
+            for INSTALLER in dist/install-server.sh dist/install-agent.sh; do
+            sed -i "s/^VERIFIER_SHA_AMD64='[^']*'/VERIFIER_SHA_AMD64='$GOT_AMD64'/" "$INSTALLER"
+            sed -i "s/^VERIFIER_SHA_ARM64='[^']*'/VERIFIER_SHA_ARM64='$GOT_ARM64'/" "$INSTALLER"
+          
+            grep -q "^VERIFIER_SHA_AMD64='$GOT_AMD64'" "$INSTALLER" || {
+            echo "failed to pin amd64 verifier hash into $INSTALLER" >&2
+            exit 1
+          }
+          
+            grep -q "^VERIFIER_SHA_ARM64='$GOT_ARM64'" "$INSTALLER" || {
+            echo "failed to pin arm64 verifier hash into $INSTALLER" >&2
+            exit 1
+          }
+            done
           cat > dist/release-manifest.json <<JSON
           {"version":"$V","protocol":1,"min_agent":"1.0.0","min_server":"1.0.0"}
           JSON
