@@ -261,8 +261,38 @@ func (a *App) nodeUpdate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "版本号格式无效", 400)
 		return
 	}
-	res, err := a.sendCommand(r.PathValue("id"), "agent_upgrade", AgentCommand{Version: target}, 135*time.Second)
-	node := a.nodeName(r.PathValue("id"))
+	nodeID := r.PathValue("id")
+	node := a.nodeName(nodeID)
+
+	a.mu.RLock()
+	n := a.state.Nodes[nodeID]
+	repo := a.state.Settings.ReleaseRepo
+	current := ""
+	if n != nil {
+		current = strings.TrimPrefix(strings.TrimSpace(n.System.Agent), "v")
+	}
+	a.mu.RUnlock()
+
+	// v1.0.2 changed the Agent helper socket/systemd layout.
+	// Older Agents must run the full installer once so binary and units migrate together.
+	if current != "" && compareVersion(current, "1.0.2") < 0 && compareVersion(target, "1.0.2") >= 0 {
+		if repo == "" {
+			repo = releaseRepo
+		}
+		cmd := "curl -fsSL https://github.com/" + repo +
+			"/releases/download/v" + target +
+			"/install-agent.sh | sh -s -- -v v" + target + " -r " + repo
+		a.audit(a.remoteIP(r), "agent_upgrade", node, "?? v"+target+"??????????", "requested")
+		writeJSON(w, 200, map[string]any{
+			"ok":                 true,
+			"migration_required": true,
+			"target_version":     target,
+			"install_command":    cmd,
+		})
+		return
+	}
+
+	res, err := a.sendCommand(nodeID, "agent_upgrade", AgentCommand{Version: target}, 135*time.Second)
 	if err != nil {
 		a.audit(a.remoteIP(r), "agent_upgrade", node, "target v"+target, "failed: "+err.Error())
 		jsonError(w, err.Error(), 503)
