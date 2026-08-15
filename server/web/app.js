@@ -204,15 +204,15 @@ async function loadAudit(){try{const a=await api('/api/audit');const rows=(a||[]
 async function loadUpdate(){try{const r=await api('/api/update/status');latestRelease=r.latest_version||'';const agents=r.agents||[];text('serverVersionMeta',`当前 v${r.server_version} · ${latestRelease?'最新 v'+latestRelease:'无法获取最新版本'} · Protocol v${r.protocol_version}`);const online=agents.filter(a=>a.status==='online').length,count=agents.filter(a=>latestRelease&&a.version&&a.version.replace(/^v/,'')!==latestRelease&&a.status==='online').length;text('agentUpdateMeta',`${online} 在线 · ${count} 台可更新`);text('updateSummary',r.server_update_available||count?`${(r.server_update_available?1:0)+count} 项可更新`:'已是最新');text('updateSummarySub',r.error?'版本源暂不可用':`Server ${r.server_update_available?'可更新':'最新'} · ${count} 个 Agent 可更新`);$('#serverUpdateBtn').disabled=!r.server_update_available||!!r.incompatible_agents;text('serverUpdateText',r.incompatible_agents?`${r.incompatible_agents} 个 Agent 不兼容，暂不能更新 Server`:(r.server_update_available?'Protocol 兼容，可更新':'当前已是最新'));renderAgentUpdates(agents);}catch(e){text('updateSummary','检查失败');text('agentUpdateMeta','检查失败');}}
 function renderAgentUpdates(a){const latest=latestRelease;html('agentUpdateRows',a.map(x=>{const cur=(x.version||'').replace(/^v/,'');const can=x.status==='online'&&latest&&cur!==latest;return `<tr><td>${esc(x.name)}</td><td>${esc(x.version||'—')}</td><td>${latest?'v'+esc(latest):'—'}</td><td><span class="badge ${x.status==='online'?'':'off'}">${x.status==='online'?(can?'可更新':'最新'):'离线'}</span></td><td>${can?`<button class="btn small agent-update" data-id="${esc(x.id)}">更新</button>`:'—'}</td></tr>`;}).join(''));$$('.agent-update').forEach(b=>b.onclick=()=>updateAgent(b.dataset.id));}
 async function updateAgent(id){
-  if(!latestRelease){toast('????????');return;}
+  if(!latestRelease){toast('未获取到目标版本');return;}
   try{
     const r=await api(`/api/nodes/${encodeURIComponent(id)}/update`,{method:'POST',json:{version:latestRelease}});
     if(r?.migration_required){
       const ok=await copyText(r.install_command||'');
-      toast(ok?'? Agent ???????????????????????':'? Agent ???????????????????');
+      toast(ok?'该 Agent 需要完整迁移，升级命令已复制，请在节点终端执行':'该 Agent 需要完整迁移，请在节点终端执行升级命令');
       return 'migration';
     }
-    toast('Agent ????????');
+    toast('Agent 更新命令执行完成');
     await loadUpdate();
     await loadNodes();
     return 'updated';
@@ -224,11 +224,11 @@ async function updateAllAgents(){
     try{
       const r=await updateAgent(b.dataset.id);
       if(r==='migration'){
-        toast('????????? Agent????????');
+        toast('发现需要完整迁移的 Agent，批量更新已暂停');
         break;
       }
     }catch{
-      toast('???????');
+      toast('批量更新已暂停');
       break;
     }
   }

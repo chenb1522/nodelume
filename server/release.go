@@ -282,7 +282,7 @@ func (a *App) nodeUpdate(w http.ResponseWriter, r *http.Request) {
 		cmd := "curl -fsSL https://github.com/" + repo +
 			"/releases/download/v" + target +
 			"/install-agent.sh | sh -s -- -v v" + target + " -r " + repo
-		a.audit(a.remoteIP(r), "agent_upgrade", node, "?? v"+target+"??????????", "requested")
+		a.audit(a.remoteIP(r), "agent_upgrade", node, "目标 v"+target+"；需要完整安装器迁移", "requested")
 		writeJSON(w, 200, map[string]any{
 			"ok":                 true,
 			"migration_required": true,
