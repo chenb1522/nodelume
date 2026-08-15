@@ -36,11 +36,14 @@ jobs:
           for ARCH in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.serverVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-server-linux-$ARCH" ./server
             CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X main.agentVersion=$V -X main.releaseRepo=${GITHUB_REPOSITORY}" -o "dist/nodelume-agent-linux-$ARCH" ./agent
-            CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w" -o "dist/nodelume-verify-linux-$ARCH" ./tools/verify
+            curl -fL --retry 3 -o "dist/nodelume-verify-linux-$ARCH" "https://github.com/${GITHUB_REPOSITORY}/releases/download/v1.0.1/nodelume-verify-linux-$ARCH"
+            chmod 0755 "dist/nodelume-verify-linux-$ARCH"
           done
           # Build-time pinning of the verifier SHA-256 into Release installers.
             GOT_AMD64=$(sha256sum dist/nodelume-verify-linux-amd64 | awk '{print $1}')
             GOT_ARM64=$(sha256sum dist/nodelume-verify-linux-arm64 | awk '{print $1}')
+            [ "$GOT_AMD64" = "b408dff9c54e194c9a437388beebe1bc010abf969499caba629f026d8dde3a27" ] || { echo "unexpected amd64 bootstrap verifier SHA256" >&2; exit 1; }
+            [ "$GOT_ARM64" = "9fd8c596ea5f6a86b8f8a137786b641815e7159191364af9f685f6f3b914649e" ] || { echo "unexpected arm64 bootstrap verifier SHA256" >&2; exit 1; }
             
             cp release.pub dist/release.pub
             cp scripts/install-server.sh scripts/install-agent.sh scripts/nlm dist/

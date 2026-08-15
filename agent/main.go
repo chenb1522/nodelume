@@ -579,7 +579,7 @@ func executeCommand(cmd AgentCommand, s *Sampler, state *ConfigState) (AgentResu
 			break
 		}
 		var out any = map[string]any{}
-		if err := helperJSON(HelperRequest{Action: "agent_upgrade", Version: target, Repo: cfg.ReleaseRepo}, &out, 40*time.Second); err != nil {
+		if err := helperJSON(HelperRequest{Action: "agent_upgrade", Version: target, Repo: cfg.ReleaseRepo}, &out, 120*time.Second); err != nil {
 			r.OK = false
 			r.Error = err.Error()
 		} else {

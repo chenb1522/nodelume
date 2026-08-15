@@ -261,7 +261,7 @@ func (a *App) nodeUpdate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "版本号格式无效", 400)
 		return
 	}
-	res, err := a.sendCommand(r.PathValue("id"), "agent_upgrade", AgentCommand{Version: target}, 45*time.Second)
+	res, err := a.sendCommand(r.PathValue("id"), "agent_upgrade", AgentCommand{Version: target}, 135*time.Second)
 	node := a.nodeName(r.PathValue("id"))
 	if err != nil {
 		a.audit(a.remoteIP(r), "agent_upgrade", node, "target v"+target, "failed: "+err.Error())
