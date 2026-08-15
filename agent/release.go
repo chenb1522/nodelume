@@ -30,11 +30,11 @@ type pendingUpdate struct {
 func performAgentUpgrade(version, repo, pubKey string, startWatchdog bool) error {
 	version = strings.TrimPrefix(version, "v")
 	if !validVersion(version) || !validRepo(repo) {
-		return errors.New("invalid version or repository")
+		return errors.New("版本号或 Release 仓库无效")
 	}
 	arch := runtime.GOARCH
 	if arch != "amd64" && arch != "arm64" {
-		return fmt.Errorf("unsupported architecture %s", arch)
+		return fmt.Errorf("不支持的 CPU 架构 %s", arch)
 	}
 	base := releaseBase(repo, "v"+version)
 	name := "nodelume-agent-linux-" + arch
@@ -55,7 +55,7 @@ func performAgentUpgrade(version, repo, pubKey string, startWatchdog bool) error
 		}
 	}
 	if err = verifySignedFile(bin, checks, sig, pubKey); err != nil {
-		return fmt.Errorf("release verification failed: %w", err)
+		return fmt.Errorf("Release 校验失败: %w", err)
 	}
 	if err = os.Chmod(bin, 0755); err != nil {
 		return err
@@ -64,13 +64,13 @@ func performAgentUpgrade(version, repo, pubKey string, startWatchdog bool) error
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "--self-check")
 	if out, er := cmd.CombinedOutput(); er != nil {
-		return fmt.Errorf("new binary self-check failed: %s", strings.TrimSpace(string(out)))
+		return fmt.Errorf("新二进制自检失败: %s", strings.TrimSpace(string(out)))
 	}
 	ctxVer, cancelVer := contextWithTimeout(5 * time.Second)
 	verOut, er := exec.CommandContext(ctxVer, bin, "--version").CombinedOutput()
 	cancelVer()
 	if er != nil || !strings.Contains(string(verOut), "NodeLume Agent v"+version+" ") {
-		return fmt.Errorf("new binary version does not match target %s", version)
+		return fmt.Errorf("新二进制版本与目标版本 %s 不一致", version)
 	}
 	current, err := os.Executable()
 	if err != nil {
@@ -83,11 +83,11 @@ func performAgentUpgrade(version, repo, pubKey string, startWatchdog bool) error
 	previous := current + ".previous"
 	_ = os.Remove(previous)
 	if err = os.Rename(current, previous); err != nil {
-		return fmt.Errorf("backup current binary: %w", err)
+		return fmt.Errorf("备份当前二进制失败: %w", err)
 	}
 	if err = os.Rename(bin, current); err != nil {
 		_ = os.Rename(previous, current)
-		return fmt.Errorf("install new binary: %w", err)
+		return fmt.Errorf("安装新二进制失败: %w", err)
 	}
 	_ = os.Chmod(current, 0755)
 	p := pendingUpdate{Previous: previous, Current: current, Target: version, InstalledAt: time.Now().Unix()}
@@ -116,7 +116,7 @@ func downloadFile(url, path string, max int64) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download %s: HTTP %d", filepath.Base(path), resp.StatusCode)
+		return fmt.Errorf("下载 %s 失败: HTTP %d", filepath.Base(path), resp.StatusCode)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
@@ -128,7 +128,7 @@ func downloadFile(url, path string, max int64) error {
 		return err
 	}
 	if n > max {
-		return errors.New("download exceeds size limit")
+		return errors.New("下载内容超过大小限制")
 	}
 	return f.Sync()
 }
@@ -147,14 +147,14 @@ func verifySignedFile(file, checksums, signature, pubKey string) error {
 	}
 	pub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(pb)))
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return errors.New("invalid Ed25519 public key")
+		return errors.New("Ed25519 公钥无效")
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sb)))
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return errors.New("invalid Ed25519 signature")
+		return errors.New("Ed25519 签名无效")
 	}
 	if !ed25519.Verify(ed25519.PublicKey(pub), cb, sig) {
-		return errors.New("signature mismatch")
+		return errors.New("签名不匹配")
 	}
 	want := ""
 	name := filepath.Base(file)
@@ -166,7 +166,7 @@ func verifySignedFile(file, checksums, signature, pubKey string) error {
 		}
 	}
 	if want == "" {
-		return errors.New("binary missing from checksums")
+		return errors.New("校验清单中缺少目标二进制")
 	}
 	b, err := os.ReadFile(file)
 	if err != nil {
@@ -174,7 +174,7 @@ func verifySignedFile(file, checksums, signature, pubKey string) error {
 	}
 	sum := sha256.Sum256(b)
 	if !strings.EqualFold(want, hex.EncodeToString(sum[:])) {
-		return errors.New("SHA256 mismatch")
+		return errors.New("SHA256 校验不匹配")
 	}
 	return nil
 }
@@ -199,7 +199,7 @@ func rollbackAgentBinary() error {
 		return err
 	}
 	if p.Previous == "" || p.Current == "" {
-		return errors.New("invalid pending update")
+		return errors.New("待处理更新状态无效")
 	}
 	failed := p.Current + ".failed"
 	_ = os.Remove(failed)

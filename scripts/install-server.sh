@@ -39,7 +39,7 @@ mkdir -p /run/lock 2>/dev/null || LOCK=/tmp/nodelume-server-install.lock
 if ! mkdir "$LOCK" 2>/dev/null; then fail 'NodeLume Server 安装/更新正在进行'; exit 1; fi
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"; rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
 fetch_url(){ u=$1; o=$2; if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 2 --connect-timeout 10 -o "$o" "$u"; elif command -v wget >/dev/null 2>&1; then wget -qO "$o" "$u"; else return 127; fi; }
-latest_tag(){ if [ -n "$LOCAL_DIR" ]; then printf 'v1.0.1'; return; fi; f="$TMP/latest.json"; fetch_url "https://api.github.com/repos/$REPO/releases/latest" "$f" || return 1; sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1; }
+latest_tag(){ if [ -n "$LOCAL_DIR" ]; then printf 'v1.0.2'; return; fi; f="$TMP/latest.json"; fetch_url "https://api.github.com/repos/$REPO/releases/latest" "$f" || return 1; sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1; }
 if [ "$VERSION" = latest ]; then VERSION=$(latest_tag) || { fail '无法查询最新 Release'; exit 3; }; fi
 VERSION="v${VERSION#v}"
 printf %s "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { fail 'VERSION_NOT_FOUND'; exit 4; }
@@ -116,8 +116,8 @@ RuntimeDirectoryMode=0750
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/nodelume /run/nodelume-server
+ProtectSystem=full
+ReadWriteDirectories=/var/lib/nodelume /run/nodelume-server
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 UMask=0077

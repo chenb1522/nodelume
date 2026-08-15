@@ -60,7 +60,6 @@ button{cursor:pointer}
 .server.offline{opacity:.68}
 .server-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:17px}
 .server-title{display:flex;gap:10px;align-items:center}
-.flag{font-size:22px}
 .name{font-weight:720;font-size:16px}
 .meta{font-size:12px;color:var(--muted);margin-top:3px}
 .status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
@@ -476,7 +475,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 /* Detail header */
 .detail-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .node-submeta{
-  margin:10px 0 0 62px;
+  margin:10px 0 0 0;
   display:flex;
   flex-wrap:wrap;
   gap:7px;
@@ -753,7 +752,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 </head>
 <body class="auth-locked">
 
-<div class="overlay show" id="setupOverlay">
+<div class="overlay" id="setupOverlay">
   <div class="auth-card">
     <div class="auth-brand"><div class="logo" aria-hidden="true"></div><strong><span style="color:var(--text)">Node</span><span style="color:var(--green)">Lume</span></strong><span class="tag">首次初始化</span></div>
     <div class="auth-title">设置管理员密码</div>
@@ -768,8 +767,8 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
         </div>
       </div>
       <div class="field"><label>确认密码</label><input id="setupPass2" type="password" placeholder="再次输入密码" minlength="8" autocomplete="new-password"></div>
-      
-      <button class="btn primary" id="setupBtn" style="margin-top:2px">初始化并进入</button>
+      <div class="locked" id="setupError"></div>
+      <button class="btn primary" id="setupBtn" style="margin-top:2px" disabled>初始化并进入</button>
     </div>
   </div>
 </div>
@@ -847,14 +846,14 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 
     <div class="add-pane active" id="add-common">
       <div class="token-card">
-        <div class="token-head"><b>通用接入 Token</b><span class="badge" id="commonTokenState">有效</span></div>
+        <div class="token-head"><b>通用接入 Token</b><span class="badge off" id="commonTokenState">未生成</span></div>
         <div class="token-meta"><span id="commonJoinedText">已接入：0 台</span><label class="token-expiry">有效期 <select id="commonTokenExpiry"><option value="1">24 小时</option><option value="7" selected>7 天</option><option value="30">30 天</option><option value="0">长期</option></select></label></div>
         <div class="form" style="margin-top:12px">
           <div class="field"><label>节点名称（可选）</label><input id="commonNodeName" placeholder="留空自动生成"></div>
         </div>
         <div class="command-box"><code id="commonInstallCommand"></code><button class="copy" id="copyCommonCommand">复制</button></div>
         <div class="note warn http-warning" id="commonHttpWarning">⚠️ 当前使用 HTTP，首次注册过程未加密。</div>
-        <div class="modal-actions"><button class="btn" id="revokeCommonToken">撤销</button><button class="btn" id="regenCommonToken">重新生成</button></div>
+        <div class="modal-actions"><button class="btn" id="revokeCommonToken" style="display:none">撤销</button><button class="btn" id="regenCommonToken">生成 Token</button></div>
       </div>
       <div class="recent-join" id="recentJoin"><h4 style="margin:0 0 6px">最近接入</h4><div class="hint">暂无</div></div>
     </div>
@@ -877,16 +876,14 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
   <div class="modal wide">
     <div class="modal-head"><div></div><button class="close" data-close="detailOverlay">✕</button></div>
     <div class="detail-top">
-      <div class="detail-id"><div class="bigflag" id="dFlag">🇭🇰</div><div><h2 id="dName">香港 HK01</h2><div class="meta" id="dMeta">Debian 13 · amd64 · Agent v1.0.1</div></div></div>
+      <div class="detail-id"><div><h2 id="dName">—</h2><div class="meta" id="dMeta">—</div></div></div>
       <div class="detail-actions">
         <button class="btn small" id="editNodeBtn">✎ 编辑节点</button>
         <div class="status" id="detailStatus"><span class="sdot" id="detailStatusDot"></span><span id="detailStatusText">在线</span></div>
       </div>
     </div>
     <div class="node-submeta" id="dNodeMeta">
-      <span class="node-meta-chip">默认分组</span>
-      <span class="node-meta-chip">上报 2 秒</span>
-      <span class="node-meta-note">主站节点，业务高峰期请谨慎操作。</span>
+      <span class="node-meta-note">—</span>
     </div>
     <div class="note warn" id="offlineBanner" style="display:none;margin-top:12px">节点当前离线。只显示最后一次缓存的概览信息；CPU / 内存 / 磁盘实时详情、进程控制和已停止项目在节点重新连接前不可用。</div>
     <div class="tabs" id="tabs">
@@ -911,19 +908,19 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
         <canvas id="overviewChart"></canvas>
       </div>
       <div class="info-grid" style="margin-top:12px">
-        <div class="info"><span>网络</span><b>↑ 1.2 MB/s　↓ 4.8 MB/s</b></div>
-        <div class="info"><span>负载</span><b>0.22 / 0.18 / 0.15</b></div>
-        <div class="info"><span>运行时间</span><b>12 天 7 小时</b></div>
+        <div class="info"><span>网络</span><b id="overviewNet">—</b></div>
+        <div class="info"><span>负载</span><b id="overviewLoad">—</b></div>
+        <div class="info"><span>运行时间</span><b id="overviewUptime">—</b></div>
         <div class="info"><span>进程数</span><b id="procCount">10</b></div>
       </div>
     </div>
 
     <div class="tabpane" id="pane-cpu">
       <div class="info-grid">
-        <div class="info"><span>CPU 型号</span><b>AMD EPYC 7B13</b></div>
-        <div class="info"><span>核心 / 线程</span><b>2 / 2</b></div>
-        <div class="info"><span>当前频率</span><b>2.45 GHz</b></div>
-        <div class="info"><span>Load Average</span><b>0.22 / 0.18 / 0.15</b></div>
+        <div class="info"><span>CPU 型号</span><b id="cpuModel">—</b></div>
+        <div class="info"><span>逻辑 CPU</span><b id="cpuCores">—</b></div>
+        <div class="info"><span>当前频率</span><b id="cpuFreq">—</b></div>
+        <div class="info"><span>Load Average</span><b id="cpuLoad">—</b></div>
       </div>
       <div class="chartbox">
         <div class="charttitle"><span>CPU 使用率</span><div class="ranges" data-chart="cpuChart"><button class="range active" data-range="1">1 分钟</button><button class="range" data-range="5">5 分钟</button><button class="range" data-range="10">10 分钟</button><button class="range" data-range="30">30 分钟</button><button class="range" data-range="60">1 小时</button></div></div>
@@ -934,10 +931,10 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 
     <div class="tabpane" id="pane-memory">
       <div class="detail-summary">
-        <div class="mini"><div class="l">总内存</div><div class="v">967 MB</div></div>
-        <div class="mini"><div class="l">已使用</div><div class="v">397 MB</div></div>
-        <div class="mini"><div class="l">可用</div><div class="v">570 MB</div></div>
-        <div class="mini"><div class="l">Swap</div><div class="v">0 MB</div></div>
+        <div class="mini"><div class="l">总内存</div><div class="v" id="memTotal">—</div></div>
+        <div class="mini"><div class="l">已使用</div><div class="v" id="memUsed">—</div></div>
+        <div class="mini"><div class="l">可用</div><div class="v" id="memAvail">—</div></div>
+        <div class="mini"><div class="l">Swap</div><div class="v" id="memSwap">—</div></div>
       </div>
       <div class="chartbox">
         <div class="charttitle"><span>内存使用率</span><div class="ranges" data-chart="memChart"><button class="range active" data-range="1">1 分钟</button><button class="range" data-range="5">5 分钟</button><button class="range" data-range="10">10 分钟</button><button class="range" data-range="30">30 分钟</button><button class="range" data-range="60">1 小时</button></div></div>
@@ -947,9 +944,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
     </div>
 
     <div class="tabpane" id="pane-disk">
-      <div class="tablewrap"><table><thead><tr><th>设备</th><th>挂载点</th><th>文件系统</th><th>已用</th><th>总量</th><th>使用率</th></tr></thead>
-      <tbody><tr><td>/dev/vda1</td><td>/</td><td>ext4</td><td>5.6 GB</td><td>20 GB</td><td>28%</td></tr><tr><td>/dev/vda15</td><td>/boot/efi</td><td>vfat</td><td>7 MB</td><td>124 MB</td><td>6%</td></tr></tbody></table></div>
-      <div class="info-grid" style="margin-top:12px"><div class="info"><span>读取</span><b>1.8 MB/s</b></div><div class="info"><span>写入</span><b>624 KB/s</b></div></div>
+      <div id="diskTable"><div class="hint">打开磁盘页后加载磁盘信息</div></div>
     </div>
 
     <div class="tabpane" id="pane-process">
@@ -965,7 +960,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
       <div class="info-grid">
         <div class="info"><span>主机名</span><b id="sysHostname">vm-hk01</b></div><div class="info"><span>操作系统</span><b id="sysOS">Debian GNU/Linux 13</b></div>
         <div class="info"><span>Kernel</span><b id="sysKernel">—</b></div><div class="info"><span>架构</span><b id="sysArch">—</b></div>
-        <div class="info"><span>Agent</span><b id="sysAgent">NodeLume Agent v1.0.1</b></div><div class="info"><span>协议</span><b id="sysProtocol">—</b></div>
+        <div class="info"><span>Agent</span><b id="sysAgent">—</b></div><div class="info"><span>协议</span><b id="sysProtocol">—</b></div>
         <div class="info"><span>连接</span><b id="sysTransport">HTTP</b></div><div class="info"><span>最后心跳</span><b id="sysHeartbeat">刚刚</b></div>
       </div>
       <div class="setting-section" style="margin-top:12px">
@@ -1066,7 +1061,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
   <div class="modal" style="max-width:440px">
     <div class="modal-head"><h3 id="confirmTitle">确认操作</h3><button class="close" data-close="confirmOverlay">✕</button></div>
     <p id="confirmText" style="line-height:1.7;font-size:14px"></p>
-    <div class="note warn" id="confirmNote"></div>
+    <div class="note warn" id="confirmNote" style="display:none"></div>
     <div class="modal-actions"><button class="btn" data-close="confirmOverlay">取消</button><button class="btn danger" id="confirmActionBtn">确认</button></div>
   </div>
 </div>
@@ -1152,6 +1147,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
               <div class="field"><label>监听地址</label><input id="listenAddress" value="0.0.0.0" placeholder="0.0.0.0"></div>
               <div class="field"><label>监听端口</label><input id="listenPort" value="19770" inputmode="numeric"></div>
             </div>
+            <div class="locked" id="listenError"></div>
             <div style="margin-top:10px;font-size:12px;color:var(--muted)">当前监听 <b id="currentListenText" style="color:var(--text)">0.0.0.0:19770</b></div>
             <div class="note warn pending-box" id="listenPendingBox">⚠️ 新监听配置已保存，重启 NodeLume Server 后生效。</div>
             <div class="modal-actions"><button class="btn" id="restartServerBtn">重启 Server</button><button class="btn primary" id="saveListenBtn">保存监听配置</button></div>
@@ -1162,6 +1158,8 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
           <div class="setting-section">
             <h4>安全入口</h4>
             <div class="field"><label>管理入口</label><input id="securePath" value="/a7k3m9"></div>
+            <div class="hint">仅支持字母、数字、短横线和下划线；“/”表示根入口。</div>
+            <div class="locked" id="securePathError"></div>
             <div class="modal-actions"><button class="btn primary" id="saveSecurePath">保存入口</button></div>
           </div>
           <div class="setting-section">
@@ -1171,7 +1169,6 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
           <div class="setting-section">
             <h4>修改管理员密码</h4>
             <div class="form" style="margin-top:0">
-              <div class="field"><label>当前密码</label><input id="oldPass" type="password" autocomplete="current-password"></div>
               <div class="field">
                 <label>新密码</label>
                 <input id="newPass" type="password" placeholder="至少 8 位" minlength="8" autocomplete="new-password">
@@ -1181,8 +1178,9 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
                 </div>
               </div>
               <div class="field"><label>确认新密码</label><input id="newPass2" type="password" minlength="8" autocomplete="new-password"></div>
+              <div class="locked" id="newPassError"></div>
             </div>
-            <div class="modal-actions"><button class="btn primary" id="changePassBtn">修改密码</button></div>
+            <div class="modal-actions"><button class="btn primary" id="changePassBtn" disabled>修改密码</button></div>
           </div>
 
           <div class="setting-section">
@@ -1233,12 +1231,12 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
             <div class="switchrow"><div><h4 style="margin:0">版本更新</h4></div><button class="btn" id="checkUpdatesBtn">检查更新</button></div>
           </div>
           <div class="update-card">
-            <div class="update-head"><div><div class="update-title">NodeLume Server</div><div class="update-meta" id="serverVersionMeta">当前 v1.0.1 · 最新 v1.0.1 · Protocol v1</div></div><button class="btn primary small" id="serverUpdateBtn">一键更新</button></div>
+            <div class="update-head"><div><div class="update-title">NodeLume Server</div><div class="update-meta" id="serverVersionMeta">—</div></div><button class="btn primary small" id="serverUpdateBtn">一键更新</button></div>
             <div class="progress"><i id="serverUpdateProgress"></i></div>
             <div class="hint" id="serverUpdateText" style="margin-top:8px">✓ 与当前所有 Agent 兼容，可安全更新</div>
           </div>
           <div class="update-card">
-            <div class="update-head"><div><div class="update-title">Agent</div><div class="update-meta">3 在线 · 1 台可更新</div></div><button class="btn small" id="allAgentUpdateBtn">更新全部</button></div>
+            <div class="update-head"><div><div class="update-title">Agent</div><div class="update-meta" id="agentUpdateMeta">—</div></div><button class="btn small" id="allAgentUpdateBtn">更新全部</button></div>
             <div class="tablewrap agent-update-wrap" style="margin-top:10px"><table class="agent-update-table"><thead><tr><th>节点</th><th>当前</th><th>目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="agentUpdateRows"></tbody></table></div>
           </div>
         </section>
@@ -1270,7 +1268,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
             </div>
             <div class="info-grid">
               <div class="info"><span>产品</span><b>NodeLume</b></div>
-              <div class="info"><span>版本</span><b id="aboutVersion">v1.0.1</b></div>
+              <div class="info"><span>版本</span><b id="aboutVersion">v1.0.2</b></div>
               <div class="info"><span>Server</span><b>nodelume-server</b></div>
               <div class="info"><span>Agent</span><b>nodelume-agent</b></div>
             </div>
@@ -1287,7 +1285,14 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .pending-box{display:none}.pending-box.show{display:block}.http-warning{display:none}.http-warning.show{display:block}
 .pretty-select{position:relative;min-width:118px}.pretty-select select{position:absolute!important;opacity:0!important;pointer-events:none!important;width:1px!important;height:1px!important}.pretty-select-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:10px;padding:9px 11px}.pretty-select-menu{position:absolute;z-index:120;left:0;right:0;top:calc(100% + 6px);display:none;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:5px}.pretty-select.open .pretty-select-menu{display:block}.pretty-select-menu button{width:100%;border:0;background:transparent;color:var(--text);text-align:left;padding:8px 10px;border-radius:8px}.pretty-select-menu button:hover,.pretty-select-menu button.active{background:var(--panel2)}
 .server-empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:50px 20px}.server-card-error{color:var(--red)}
-@media(max-width:560px){.token-meta{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;align-items:center!important}.token-expiry{display:flex!important;align-items:center!important;gap:7px!important;white-space:nowrap!important}.token-expiry .pretty-select{width:110px}}
+#settingsOverlay .modal.wide{overflow:hidden;display:flex;flex-direction:column}
+#settingsOverlay .setting-layout{min-height:0;flex:1}
+#settingsOverlay .setting-layout>div{min-height:0;overflow-y:auto;padding-right:4px}
+#settingsOverlay .setting-nav{align-self:start}
+.top-proc-row{cursor:pointer}.top-proc-row:hover{background:var(--panel2)}
+#securePathError:empty,#newPassError:empty,#setupError:empty,#listenError:empty{display:none}
+.btn:disabled{cursor:not-allowed;opacity:.55;transform:none!important;box-shadow:none!important}
+@media(max-width:560px){.token-meta{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;align-items:center!important}.token-expiry{display:flex!important;align-items:center!important;gap:7px!important;white-space:nowrap!important}.token-expiry .pretty-select{width:110px}#settingsOverlay .modal.wide{overflow:auto;display:block}#settingsOverlay .setting-layout>div{overflow:visible;padding-right:0}}
 </style>
 <script src="/assets/app.js" defer></script>
 </body>

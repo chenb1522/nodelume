@@ -38,6 +38,11 @@ func (s *Sampler) Sample() Heartbeat {
 	if total > avail {
 		used = total - avail
 	}
+	swapTotal, swapFree := readSwapMemory()
+	swapUsed := uint64(0)
+	if swapTotal > swapFree {
+		swapUsed = swapTotal - swapFree
+	}
 	du, dt := rootDisk()
 	l1, l5, l15 := readLoad()
 	ni, no := readNetworkTotals()
@@ -55,7 +60,7 @@ func (s *Sampler) Sample() Heartbeat {
 	if now.Sub(s.lastProcScan) >= 5*time.Second {
 		s.scanProcessesLocked(curCPU.total)
 	}
-	return Heartbeat{Time: now.Unix(), CPU: cpu, Memory: pct(used, total), MemoryUsed: used, MemoryAvail: avail, Disk: pct(du, dt), DiskUsed: du, DiskTotal: dt, Temperature: readTemperature(), Load1: l1, Load5: l5, Load15: l15, NetIn: inRate, NetOut: outRate, Uptime: readUptime(), Processes: countProcesses(), TopCPU: append([]ProcessSummary(nil), s.topCPU...), TopMemory: append([]ProcessSummary(nil), s.topMem...), System: s.sys}
+	return Heartbeat{Time: now.Unix(), CPU: cpu, CPUFreqMHz: readCPUFreqMHz(), Memory: pct(used, total), MemoryUsed: used, MemoryAvail: avail, SwapUsed: swapUsed, SwapTotal: swapTotal, Disk: pct(du, dt), DiskUsed: du, DiskTotal: dt, Temperature: readTemperature(), Load1: l1, Load5: l5, Load15: l15, NetIn: inRate, NetOut: outRate, Uptime: readUptime(), Processes: countProcesses(), TopCPU: append([]ProcessSummary(nil), s.topCPU...), TopMemory: append([]ProcessSummary(nil), s.topMem...), System: s.sys}
 }
 func (s *Sampler) scanProcesses() {
 	s.mu.Lock()
@@ -255,6 +260,56 @@ func readMemory() (uint64, uint64) {
 	}
 	return total, avail
 }
+func readSwapMemory() (uint64, uint64) {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0
+	}
+	var total, free uint64
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 2 {
+			continue
+		}
+		v, _ := strconv.ParseUint(f[1], 10, 64)
+		v *= 1024
+		switch strings.TrimSuffix(f[0], ":") {
+		case "SwapTotal":
+			total = v
+		case "SwapFree":
+			free = v
+		}
+	}
+	return total, free
+}
+
+func readCPUFreqMHz() float64 {
+	f, err := os.Open("/proc/cpuinfo")
+	if err == nil {
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "cpu MHz") {
+				if i := strings.IndexByte(line, ':'); i >= 0 {
+					v, _ := strconv.ParseFloat(strings.TrimSpace(line[i+1:]), 64)
+					if v > 0 {
+						return v
+					}
+				}
+			}
+		}
+	}
+	for _, path := range []string{"/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_cur_freq"} {
+		if b, err := os.ReadFile(path); err == nil {
+			v, _ := strconv.ParseFloat(strings.TrimSpace(string(b)), 64)
+			if v > 0 {
+				return v / 1000
+			}
+		}
+	}
+	return 0
+}
 func rootDisk() (uint64, uint64) {
 	var st syscall.Statfs_t
 	if syscall.Statfs("/", &st) != nil {
@@ -434,22 +489,44 @@ func uidToName(uid string) string {
 	return uid
 }
 func readDisks() []DiskInfo {
-	b, _ := os.ReadFile("/proc/mounts")
-	seen := map[string]bool{}
-	var out []DiskInfo
-	skip := map[string]bool{"proc": true, "sysfs": true, "tmpfs": true, "devtmpfs": true, "devpts": true, "cgroup": true, "cgroup2": true, "squashfs": true, "securityfs": true, "pstore": true, "debugfs": true, "tracefs": true, "configfs": true}
+	b, _ := os.ReadFile("/proc/self/mountinfo")
+	type mountEntry struct {
+		key, source, mount, fs string
+	}
+	entries := []mountEntry{}
 	for _, l := range strings.Split(string(b), "\n") {
 		f := strings.Fields(l)
-		if len(f) < 3 {
+		if len(f) < 10 {
 			continue
 		}
-		dev, mnt, fs := f[0], f[1], f[2]
-		if skip[fs] || seen[mnt] {
+		sep := -1
+		for i, x := range f {
+			if x == "-" {
+				sep = i
+				break
+			}
+		}
+		if sep < 0 || sep+2 >= len(f) {
 			continue
 		}
-		seen[mnt] = true
+		key, mnt, fs, source := f[2], decodeMountField(f[4]), f[sep+1], decodeMountField(f[sep+2])
+		entries = append(entries, mountEntry{key: key + "|" + fs, source: source, mount: mnt, fs: fs})
+	}
+	skip := map[string]bool{"proc": true, "sysfs": true, "tmpfs": true, "devtmpfs": true, "devpts": true, "cgroup": true, "cgroup2": true, "squashfs": true, "securityfs": true, "pstore": true, "debugfs": true, "tracefs": true, "configfs": true}
+	chosen := map[string]mountEntry{}
+	for _, e := range entries {
+		if skip[e.fs] {
+			continue
+		}
+		old, ok := chosen[e.key]
+		if !ok || betterDiskMount(e.mount, old.mount) {
+			chosen[e.key] = e
+		}
+	}
+	out := make([]DiskInfo, 0, len(chosen))
+	for _, e := range chosen {
 		var st syscall.Statfs_t
-		if syscall.Statfs(mnt, &st) != nil {
+		if syscall.Statfs(e.mount, &st) != nil {
 			continue
 		}
 		tot := st.Blocks * uint64(st.Bsize)
@@ -458,9 +535,44 @@ func readDisks() []DiskInfo {
 			continue
 		}
 		used := tot - free
-		out = append(out, DiskInfo{Name: dev, Mount: mnt, FSType: fs, Used: used, Total: tot, Percent: pct(used, tot)})
+		out = append(out, DiskInfo{Name: e.source, Mount: e.mount, FSType: e.fs, Used: used, Total: tot, Percent: pct(used, tot)})
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Mount == "/" {
+			return true
+		}
+		if out[j].Mount == "/" {
+			return false
+		}
+		return out[i].Mount < out[j].Mount
+	})
 	return out
+}
+
+func betterDiskMount(next, current string) bool {
+	if next == "/" {
+		return true
+	}
+	if current == "/" {
+		return false
+	}
+	noise := func(p string) bool {
+		for _, prefix := range []string{"/var/lib/nodelume", "/run/", "/tmp", "/var/tmp", "/etc/", "/usr/"} {
+			if p == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(p, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	if noise(current) != noise(next) {
+		return !noise(next)
+	}
+	return len(next) < len(current)
+}
+
+func decodeMountField(v string) string {
+	repl := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	return repl.Replace(v)
 }
 func readNetworkInterfaces() []map[string]any {
 	ifs, _ := net.Interfaces()

@@ -21,7 +21,7 @@ case $(uname -m) in x86_64|amd64)ARCH=amd64;PIN=$VERIFIER_SHA_AMD64;;aarch64|arm
 LOCK=/run/lock/nodelume-agent-install.lock; mkdir -p /run/lock 2>/dev/null || LOCK=/tmp/nodelume-agent-install.lock; mkdir "$LOCK" 2>/dev/null || { fail 'Agent 安装/更新正在进行';exit 1; }
 TMP=$(mktemp -d);trap 'rm -rf "$TMP";rmdir "$LOCK" 2>/dev/null||true' EXIT INT TERM
 fetch_url(){ u=$1;o=$2;if command -v curl >/dev/null 2>&1;then curl -fsSL --retry 2 --connect-timeout 10 -o "$o" "$u";elif command -v wget >/dev/null 2>&1;then wget -qO "$o" "$u";else return 127;fi; }
-if [ "$VERSION" = latest ]; then if [ -n "$LOCAL_DIR" ];then VERSION=v1.0.1;else fetch_url "https://api.github.com/repos/$REPO/releases/latest" "$TMP/latest.json"||{ fail '无法查询最新 Release';exit 3;};VERSION=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TMP/latest.json"|head -1);fi;fi
+if [ "$VERSION" = latest ]; then if [ -n "$LOCAL_DIR" ];then VERSION=v1.0.2;else fetch_url "https://api.github.com/repos/$REPO/releases/latest" "$TMP/latest.json"||{ fail '无法查询最新 Release';exit 3;};VERSION=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TMP/latest.json"|head -1);fi;fi
 VERSION="v${VERSION#v}";printf %s "$VERSION"|grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'||{ fail 'VERSION_NOT_FOUND';exit 4; }
 vercmp(){ awk -v a="${1#v}" -v b="${2#v}" 'BEGIN{split(a,A,".");split(b,B,".");for(i=1;i<=3;i++){if((A[i]+0)>(B[i]+0)){print 1;exit}if((A[i]+0)<(B[i]+0)){print -1;exit}}print 0}'; }
 CURRENT="";[ -x /usr/local/bin/nodelume-agent ]&&CURRENT=$(/usr/local/bin/nodelume-agent --version 2>/dev/null|sed -n 's/.* v\([0-9][^ ]*\).*/v\1/p'|head -1)
@@ -52,7 +52,7 @@ BACK="$TMP/backup";mkdir -p "$BACK";for f in /usr/local/bin/nodelume-agent /usr/
 restore_or_remove(){ src=$1;dst=$2;if [ -f "$BACK/$src" ];then cp -a "$BACK/$src" "$dst";else rm -f "$dst";fi;}
 rollback(){ fail '新 Agent 启动/连接测试失败，正在回滚';restore_or_remove _usr_local_bin_nodelume-agent /usr/local/bin/nodelume-agent;restore_or_remove _usr_local_bin_nlm /usr/local/bin/nlm;restore_or_remove _usr_local_lib_nodelume_install-agent.sh /usr/local/lib/nodelume/install-agent.sh;restore_or_remove _var_lib_nodelume-agent_agent.json /var/lib/nodelume-agent/agent.json;restore_or_remove _etc_nodelume_release.pub /etc/nodelume/release.pub;restore_or_remove _etc_systemd_system_nodelume-agent.service /etc/systemd/system/nodelume-agent.service;restore_or_remove _etc_systemd_system_nodelume-agent-helper.socket /etc/systemd/system/nodelume-agent-helper.socket;restore_or_remove _etc_systemd_system_nodelume-agent-helper.service /etc/systemd/system/nodelume-agent-helper.service;systemctl daemon-reload >/dev/null 2>&1||true;systemctl restart nodelume-agent >/dev/null 2>&1||true; }
 id nodelume-agent >/dev/null 2>&1||useradd --system --home-dir /var/lib/nodelume-agent --shell /usr/sbin/nologin nodelume-agent
-install -d -m0750 -o nodelume-agent -g nodelume-agent /var/lib/nodelume-agent;install -d -m0755 /etc/nodelume /usr/local/lib/nodelume
+install -d -m0750 -o nodelume-agent -g nodelume-agent /var/lib/nodelume-agent;install -d -m0700 -o root -g root /var/lib/nodelume-agent-helper;install -d -m0755 /etc/nodelume /usr/local/lib/nodelume
 install -m0755 "$TMP/$BIN" /usr/local/bin/nodelume-agent;install -m0755 "$TMP/nlm" /usr/local/bin/nlm;install -m0755 "$TMP/install-agent.sh" /usr/local/lib/nodelume/install-agent.sh;install -m0644 "$TMP/release.pub" /etc/nodelume/release.pub
 [ -f /var/lib/nodelume-agent/agent.json ]||printf '{"config_version":2,"report_interval_sec":2}\n'>/var/lib/nodelume-agent/agent.json
 chown nodelume-agent:nodelume-agent /var/lib/nodelume-agent/agent.json;chmod 0600 /var/lib/nodelume-agent/agent.json
@@ -60,7 +60,7 @@ cat >/etc/systemd/system/nodelume-agent-helper.socket <<'UNIT'
 [Unit]
 Description=NodeLume Agent privileged helper socket
 [Socket]
-ListenStream=/run/nodelume-agent/helper.sock
+ListenStream=/run/nodelume-agent-helper.sock
 SocketUser=root
 SocketGroup=nodelume-agent
 SocketMode=0660
@@ -79,8 +79,8 @@ ExecStart=/usr/local/bin/nodelume-agent --helper
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=/usr/local/bin /var/lib/nodelume-agent /run/nodelume-agent
+ProtectSystem=full
+ReadWriteDirectories=/usr/local/bin /var/lib/nodelume-agent /var/lib/nodelume-agent-helper
 UNIT
 cat >/etc/systemd/system/nodelume-agent.service <<'UNIT'
 [Unit]
@@ -98,8 +98,8 @@ RuntimeDirectoryMode=0750
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/nodelume-agent /run/nodelume-agent
+ProtectSystem=full
+ReadWriteDirectories=/var/lib/nodelume-agent /run/nodelume-agent
 UMask=0077
 [Install]
 WantedBy=multi-user.target

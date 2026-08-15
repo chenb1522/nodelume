@@ -24,11 +24,11 @@ import (
 	"time"
 )
 
-var agentVersion = "1.0.1"
+var agentVersion = "1.0.2"
 var releaseRepo = "chenb1522/nodelume"
 
 const protocolVersion = 1
-const helperSocket = "/run/nodelume-agent/helper.sock"
+const helperSocket = "/run/nodelume-agent-helper.sock"
 const stoppedPath = "/var/lib/nodelume-agent-helper/stopped.json"
 const pendingUpdatePath = "/var/lib/nodelume-agent-helper/update/pending.json"
 
@@ -113,26 +113,30 @@ type StoppedRecord struct {
 	GID       uint32   `json:"-"`
 }
 type Heartbeat struct {
-	Time        int64            `json:"time"`
-	CPU         float64          `json:"cpu"`
-	Memory      float64          `json:"memory"`
-	MemoryUsed  uint64           `json:"memory_used"`
-	MemoryAvail uint64           `json:"memory_available"`
-	Disk        float64          `json:"disk"`
-	DiskUsed    uint64           `json:"disk_used"`
-	DiskTotal   uint64           `json:"disk_total"`
-	Temperature *float64         `json:"temperature,omitempty"`
-	Load1       float64          `json:"load1"`
-	Load5       float64          `json:"load5"`
-	Load15      float64          `json:"load15"`
-	NetIn       float64          `json:"net_in"`
-	NetOut      float64          `json:"net_out"`
-	Uptime      float64          `json:"uptime"`
-	Processes   int              `json:"processes"`
-	TopCPU      []ProcessSummary `json:"top_cpu"`
-	TopMemory   []ProcessSummary `json:"top_memory"`
-	System      SystemInfo       `json:"system"`
-	Self        SelfStats        `json:"self,omitempty"`
+	Time              int64            `json:"time"`
+	CPU               float64          `json:"cpu"`
+	CPUFreqMHz        float64          `json:"cpu_freq_mhz,omitempty"`
+	Memory            float64          `json:"memory"`
+	MemoryUsed        uint64           `json:"memory_used"`
+	MemoryAvail       uint64           `json:"memory_available"`
+	SwapUsed          uint64           `json:"swap_used,omitempty"`
+	SwapTotal         uint64           `json:"swap_total,omitempty"`
+	Disk              float64          `json:"disk"`
+	DiskUsed          uint64           `json:"disk_used"`
+	DiskTotal         uint64           `json:"disk_total"`
+	Temperature       *float64         `json:"temperature,omitempty"`
+	Load1             float64          `json:"load1"`
+	Load5             float64          `json:"load5"`
+	Load15            float64          `json:"load15"`
+	NetIn             float64          `json:"net_in"`
+	NetOut            float64          `json:"net_out"`
+	Uptime            float64          `json:"uptime"`
+	Processes         int              `json:"processes"`
+	ReportIntervalSec int              `json:"report_interval_sec,omitempty"`
+	TopCPU            []ProcessSummary `json:"top_cpu"`
+	TopMemory         []ProcessSummary `json:"top_memory"`
+	System            SystemInfo       `json:"system"`
+	Self              SelfStats        `json:"self,omitempty"`
 }
 type AgentCommand struct {
 	Protocol  int    `json:"protocol"`
@@ -162,6 +166,7 @@ type RegisterRequest struct {
 }
 type RegisterResponse struct {
 	NodeID            string `json:"node_id"`
+	NodeName          string `json:"node_name"`
 	Secret            string `json:"secret"`
 	ServerVersion     string `json:"server_version"`
 	ProtocolMin       int    `json:"protocol_min"`
@@ -169,10 +174,12 @@ type RegisterResponse struct {
 	ReportIntervalSec int    `json:"report_interval_sec"`
 }
 type HeartbeatResponse struct {
-	OK                bool   `json:"ok"`
-	ServerURL         string `json:"server_url"`
-	ServerProtocol    int    `json:"server_protocol"`
-	ReportIntervalSec int    `json:"report_interval_sec"`
+	OK                  bool   `json:"ok"`
+	NodeName            string `json:"node_name"`
+	ServerURL           string `json:"server_url"`
+	ServerProtocol      int    `json:"server_protocol"`
+	ReportIntervalSec   int    `json:"report_interval_sec"`
+	HeartbeatExtensions bool   `json:"heartbeat_extensions"`
 }
 type DiskInfo struct {
 	Name    string  `json:"name"`
@@ -229,9 +236,9 @@ func main() {
 	}
 	if *verifyFile != "" {
 		if err := verifySignedFile(*verifyFile, *checksums, *signature, *pubKey); err != nil {
-			fatalf("release verification: %v", err)
+			fatalf("发布文件校验失败: %v", err)
 		}
-		fmt.Println("release verification OK")
+		fmt.Println("发布文件校验通过")
 		return
 	}
 	if *selfCheck {
@@ -240,36 +247,39 @@ func main() {
 	}
 	if *helper {
 		if err := runHelper(*helperSock); err != nil {
-			fatalf("helper: %v", err)
+			fatalf("特权 Helper 启动失败: %v", err)
 		}
 		return
 	}
 	if *rollback {
 		if err := rollbackAgentBinary(); err != nil {
-			fatalf("rollback: %v", err)
+			fatalf("回滚失败: %v", err)
 		}
-		fmt.Println("rollback OK")
+		fmt.Println("回滚完成")
 		return
 	}
 	if *commit {
 		if err := commitAgentUpdate(); err != nil {
-			fatalf("commit: %v", err)
+			fatalf("提交更新状态失败: %v", err)
 		}
-		fmt.Println("update commit OK")
+		fmt.Println("更新状态已提交")
 		return
 	}
 	if *upgradeSelf != "" {
 		if os.Geteuid() != 0 {
-			fatalf("--upgrade-self must run as root")
+			fatalf("自更新必须使用 root 权限运行")
 		}
 		if err := performAgentUpgrade(strings.TrimPrefix(*upgradeSelf, "v"), *repoFlag, *pubKey, false); err != nil {
-			fatalf("upgrade: %v", err)
+			fatalf("更新失败: %v", err)
 		}
-		fmt.Println("agent binary installed; restart and health-check before commit")
+		fmt.Println("Agent 二进制已安装；请重启并通过健康检查后提交更新状态")
 		return
 	}
 
-	cfg, _ := loadConfig(*configPath)
+	cfg, cfgErr := loadConfig(*configPath)
+	if cfgErr != nil && !errors.Is(cfgErr, os.ErrNotExist) {
+		fatalf("读取配置失败: %v", cfgErr)
+	}
 	if *server != "" {
 		cfg.Server = strings.TrimRight(*server, "/")
 	}
@@ -290,68 +300,90 @@ func main() {
 	}
 	if cfg.Server == "" {
 		fmt.Println("NodeLume Agent: 未绑定 Server，使用 nlm agent bind -s <SERVER> -t <TOKEN> 完成绑定。")
-		select {}
+		done := make(chan os.Signal, 1)
+		signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
+		<-done
+		return
 	}
 	cfg.Server = strings.TrimRight(cfg.Server, "/")
 	if err := validateServerURL(cfg.Server); err != nil {
-		fatalf("server URL: %v", err)
+		fatalf("Server 地址无效: %v", err)
 	}
 	state := &ConfigState{cfg: cfg, path: *configPath}
 	client := agentHTTPClient(35 * time.Second)
 	sampler := newSampler()
 	if cfg.NodeID == "" || cfg.Secret == "" {
 		if cfg.EnrollmentToken == "" {
-			fatalf("agent is not enrolled and no enrollment token is configured")
+			fatalf("Agent 尚未接入，且未配置接入 Token")
 		}
 		var rr RegisterResponse
 		if err := doJSON(client, "POST", cfg.Server+"/api/agent/register", "", RegisterRequest{Token: cfg.EnrollmentToken, Name: cfg.Name, EnrollmentID: enrollmentID(cfg), AgentVersion: "v" + agentVersion, Protocol: protocolVersion, System: sampler.sys}, &rr); err != nil {
-			fatalf("registration failed: %v", err)
+			fatalf("Agent 接入失败: %v", err)
 		}
 		cfg.NodeID, cfg.Secret, cfg.EnrollmentToken = rr.NodeID, rr.Secret, ""
+		if strings.TrimSpace(rr.NodeName) != "" {
+			cfg.Name = strings.TrimSpace(rr.NodeName)
+		}
 		if rr.ReportIntervalSec > 0 {
 			cfg.ReportIntervalSec = rr.ReportIntervalSec
 		}
 		if err := state.set(cfg); err != nil {
-			fatalf("save config: %v", err)
+			fatalf("保存 Agent 配置失败: %v", err)
 		}
 		fmt.Printf("NodeLume Agent enrolled as %s\n", cfg.NodeID)
 	}
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
-	go heartbeatLoop(client, state, sampler)
-	go commandLoop(client, state, sampler)
+	intervalWake := make(chan struct{}, 1)
+
+	go heartbeatLoop(client, state, sampler, intervalWake)
+	go commandLoop(client, state, sampler, intervalWake)
 	<-done
 }
 
-func heartbeatLoop(client *http.Client, state *ConfigState, s *Sampler) {
+func heartbeatLoop(client *http.Client, state *ConfigState, s *Sampler, intervalWake <-chan struct{}) {
 	firstCommit := true
+	heartbeatExtensions := false
 	for {
 		cfg := state.get()
 		hb := s.Sample()
+		hb.ReportIntervalSec = cfg.ReportIntervalSec
 		hb.Self = agentSelfStats(state.path)
 		writeAgentRuntimeStatus(state.path, hb.Self, cfg)
+		wireHB := heartbeatForServer(hb, heartbeatExtensions)
 		var out HeartbeatResponse
-		err := doJSON(client, "POST", cfg.Server+"/api/agent/heartbeat", auth(cfg), hb, &out)
+		err := doJSON(client, "POST", cfg.Server+"/api/agent/heartbeat", auth(cfg), wireHB, &out)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "heartbeat: %v\n", err)
+			fmt.Fprintf(os.Stderr, "心跳失败：%v\n", err)
 		} else {
+			heartbeatExtensions = out.HeartbeatExtensions
 			if firstCommit && out.ServerProtocol == protocolVersion {
 				if _, er := helperCall(HelperRequest{Action: "agent_update_commit"}, 10*time.Second); er == nil {
 					firstCommit = false
 				}
 			}
+			configChanged := false
+			if name := strings.TrimSpace(out.NodeName); name != "" && name != cfg.Name {
+				cfg.Name = name
+				configChanged = true
+			}
 			if out.ReportIntervalSec == 2 || out.ReportIntervalSec == 5 || out.ReportIntervalSec == 10 || out.ReportIntervalSec == 30 || out.ReportIntervalSec == 60 {
 				if out.ReportIntervalSec != cfg.ReportIntervalSec {
 					cfg.ReportIntervalSec = out.ReportIntervalSec
-					_ = state.set(cfg)
+					configChanged = true
+				}
+			}
+			if configChanged {
+				if state.set(cfg) == nil {
+					writeAgentRuntimeStatus(state.path, hb.Self, cfg)
 				}
 			}
 			if out.ServerURL != "" && out.ServerURL != cfg.Server {
-				next := cfg
+				next := state.get()
 				next.Server = strings.TrimRight(out.ServerURL, "/")
 				if validateServerURL(next.Server) == nil && testAuthenticatedServer(next.Server, next) == nil {
 					if state.set(next) == nil {
-						fmt.Fprintf(os.Stderr, "server endpoint migrated to %s\n", next.Server)
+						fmt.Fprintf(os.Stderr, "Server 地址已切换至 %s\n", next.Server)
 					}
 				}
 			}
@@ -360,9 +392,33 @@ func heartbeatLoop(client *http.Client, state *ConfigState, s *Sampler) {
 		if interval != 2 && interval != 5 && interval != 10 && interval != 30 && interval != 60 {
 			interval = 2
 		}
-		time.Sleep(time.Duration(interval) * time.Second)
+		timer := time.NewTimer(time.Duration(interval) * time.Second)
+		select {
+		case <-timer.C:
+		case <-intervalWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
 	}
 }
+func heartbeatForServer(hb Heartbeat, extensions bool) Heartbeat {
+	if extensions {
+		return hb
+	}
+	// Protocol 1 servers prior to heartbeat extensions reject unknown JSON
+	// fields. Start with the legacy payload and enable additive metrics only
+	// after the Server explicitly advertises support.
+	hb.CPUFreqMHz = 0
+	hb.SwapUsed = 0
+	hb.SwapTotal = 0
+	hb.ReportIntervalSec = 0
+	return hb
+}
+
 func verifyEndpoint(base string) bool {
 	c := agentHTTPClient(5 * time.Second)
 	resp, err := c.Get(strings.TrimRight(base, "/") + "/healthz")
@@ -372,7 +428,8 @@ func verifyEndpoint(base string) bool {
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
 }
-func commandLoop(client *http.Client, state *ConfigState, s *Sampler) {
+func commandLoop(client *http.Client, state *ConfigState, s *Sampler, intervalWake chan<- struct{}) {
+
 	for {
 		cfg := state.get()
 		req, _ := http.NewRequest("GET", cfg.Server+"/api/agent/commands?wait=25", nil)
@@ -400,6 +457,17 @@ func commandLoop(client *http.Client, state *ConfigState, s *Sampler) {
 		}
 		res, restart := executeCommand(cmd, s, state)
 		_ = doJSON(client, "POST", cfg.Server+"/api/agent/results", auth(cfg), res, nil)
+
+		// Wake the heartbeat only after the command result has been delivered.
+		// This lets the Server commit its desired interval before the immediate
+		// heartbeat asks for configuration again.
+		if cmd.Action == "set_report_interval" && res.OK {
+			select {
+			case intervalWake <- struct{}{}:
+			default:
+			}
+		}
+
 		if restart && res.OK {
 			time.Sleep(400 * time.Millisecond)
 			os.Exit(0)
@@ -542,7 +610,7 @@ type HelperResponse struct {
 func helperCall(req HelperRequest, timeout time.Duration) (HelperResponse, error) {
 	c, err := net.DialTimeout("unix", helperSocketPath(), 2*time.Second)
 	if err != nil {
-		return HelperResponse{}, fmt.Errorf("privileged helper unavailable: %w", err)
+		return HelperResponse{}, fmt.Errorf("特权 Helper 不可用: %w", err)
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(timeout))
@@ -572,10 +640,10 @@ func helperJSON(req HelperRequest, out any, timeout time.Duration) error {
 func validateServerURL(raw string, _ ...bool) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return errors.New("invalid server URL")
+		return errors.New("Server 地址无效")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return errors.New("only http:// or https:// is allowed")
+		return errors.New("Server 地址仅支持 http:// 或 https://")
 	}
 	if u.Scheme == "http" {
 		fmt.Fprintln(os.Stderr, "[WARN] 当前使用 HTTP，首次注册和通信未加密。")
@@ -662,7 +730,8 @@ func loadConfig(path string) (Config, error) {
 	return c, err
 }
 func saveConfig(path string, c Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(c, "", "  ")
@@ -670,30 +739,56 @@ func saveConfig(path string, c Config) error {
 		return err
 	}
 	b = append(b, '\n')
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+
+	// Use the config directory owner for the replacement file. The standard
+	// directory is owned by nodelume-agent; this also repairs a config that a
+	// previous root CLI rewrite accidentally left as root:root 0600.
+	targetUID, targetGID := -1, -1
+	if st, err := os.Stat(dir); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			targetUID, targetGID = int(sys.Uid), int(sys.Gid)
+		}
+	}
+
+	f, err := os.CreateTemp(dir, ".agent.json.tmp-*")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if err = f.Chmod(0600); err != nil {
+		cleanup()
 		return err
 	}
 	if _, err = f.Write(b); err == nil {
 		err = f.Sync()
 	}
-	cerr := f.Close()
-	if err == nil {
-		err = cerr
-	}
 	if err != nil {
+		cleanup()
+		return err
+	}
+	if err = f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err = os.Chmod(tmp, 0600); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	if targetUID >= 0 && targetGID >= 0 {
+		if st, er := os.Stat(tmp); er == nil {
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok && (int(sys.Uid) != targetUID || int(sys.Gid) != targetGID) {
+				if er = os.Chown(tmp, targetUID, targetGID); er != nil {
+					_ = os.Remove(tmp)
+					return er
+				}
+			}
+		}
 	}
 	if err = os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	if d, er := os.Open(filepath.Dir(path)); er == nil {
+	if d, er := os.Open(dir); er == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}

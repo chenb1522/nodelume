@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -22,13 +23,13 @@ func TestRingCapacityAndSince(t *testing.T) {
 }
 
 func TestAdminPathValidation(t *testing.T) {
-	good := []string{"/abc12", "/secure_path", "/A-b_123"}
+	good := []string{"/abc", "/666", "/abc12", "/secure_path", "/A-b_123"}
 	for _, p := range good {
 		if !validAdminPath(p) {
 			t.Fatalf("expected valid path %q", p)
 		}
 	}
-	bad := []string{"/", "/abc", "/api-test", "/has/slash", "/bad?x"}
+	bad := []string{"/", "/api-test", "/has/slash", "/bad?x"}
 	for _, p := range bad {
 		if validAdminPath(p) {
 			t.Fatalf("expected invalid path %q", p)
@@ -55,5 +56,26 @@ func TestVersionCompare(t *testing.T) {
 	}
 	if compareVersion("1.0.0", "v1.0.0") != 0 {
 		t.Fatal("version equality failed")
+	}
+}
+
+func TestSessionPersistsAcrossReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	a := &App{dataPath: path, listen: "127.0.0.1:8080", runtime: map[string]*RuntimeNode{}, loginFails: map[string]LoginFail{}, nonces: map[string]int64{}, enrollRate: map[string][]int64{}}
+	if err := a.load(); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Sessions["session-test"] = Session{CSRF: "csrf-test", Expires: time.Now().Add(time.Hour)}
+	if err := a.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := &App{dataPath: path, listen: "127.0.0.1:8080", runtime: map[string]*RuntimeNode{}, loginFails: map[string]LoginFail{}, nonces: map[string]int64{}, enrollRate: map[string][]int64{}}
+	if err := b.load(); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := b.state.Sessions["session-test"]
+	if !ok || got.CSRF != "csrf-test" || time.Now().After(got.Expires) {
+		t.Fatalf("persisted session missing or invalid: %#v", got)
 	}
 }

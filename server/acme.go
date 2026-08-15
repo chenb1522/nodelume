@@ -154,7 +154,7 @@ func (a *App) applyHTTPSSettings(w http.ResponseWriter, r *http.Request) {
 		err := a.saveLocked()
 		a.mu.Unlock()
 		if err != nil {
-			jsonError(w, "save failed", 500)
+			jsonError(w, "保存失败", 500)
 			return
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "restart_required": true})
@@ -327,7 +327,7 @@ func installCertificatePair(certPath, keyPath string, certPEM, keyPEM []byte) er
 		return err
 	}
 	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
-		return fmt.Errorf("certificate/key mismatch: %w", err)
+		return fmt.Errorf("证书与私钥不匹配: %w", err)
 	}
 	suffix := fmt.Sprintf(".%d.tmp", time.Now().UnixNano())
 	ct, kt := certPath+suffix, keyPath+suffix
@@ -434,7 +434,7 @@ func (a *App) obtainACMECertificate(ctx context.Context, domain string, rt *HTTP
 			}
 		}
 		if ch == nil {
-			return nil, nil, errors.New("ACME authorization has no http-01 challenge")
+			return nil, nil, errors.New("ACME 授权未提供 http-01 challenge")
 		}
 		keyAuth := ch.Token + "." + thumb
 		rt.challengeMu.Lock()
@@ -447,7 +447,7 @@ func (a *App) obtainACMECertificate(ctx context.Context, domain string, rt *HTTP
 		deadline := time.Now().Add(70 * time.Second)
 		for {
 			if time.Now().After(deadline) {
-				return nil, nil, errors.New("ACME authorization timed out")
+				return nil, nil, errors.New("ACME 授权等待超时")
 			}
 			time.Sleep(2 * time.Second)
 			var cur acmeAuthz
@@ -458,7 +458,7 @@ func (a *App) obtainACMECertificate(ctx context.Context, domain string, rt *HTTP
 				break
 			}
 			if cur.Status == "invalid" {
-				return nil, nil, errors.New("ACME HTTP-01 validation failed")
+				return nil, nil, errors.New("ACME HTTP-01 校验失败")
 			}
 		}
 		rt.challengeMu.Lock()
@@ -480,7 +480,7 @@ func (a *App) obtainACMECertificate(ctx context.Context, domain string, rt *HTTP
 	deadline := time.Now().Add(70 * time.Second)
 	for {
 		if time.Now().After(deadline) {
-			return nil, nil, errors.New("ACME order timed out")
+			return nil, nil, errors.New("ACME 订单等待超时")
 		}
 		time.Sleep(2 * time.Second)
 		var cur acmeOrder
@@ -500,7 +500,7 @@ func (a *App) obtainACMECertificate(ctx context.Context, domain string, rt *HTTP
 			return certBody, keyPEM, nil
 		}
 		if cur.Status == "invalid" {
-			return nil, nil, errors.New("ACME order became invalid")
+			return nil, nil, errors.New("ACME 订单状态无效")
 		}
 	}
 }
@@ -515,7 +515,7 @@ func (a *App) loadOrCreateACMEAccount() (*ecdsa.PrivateKey, string, error) {
 	if b, err := os.ReadFile(kp); err == nil {
 		block, _ := pem.Decode(b)
 		if block == nil {
-			return nil, "", errors.New("invalid ACME account key")
+			return nil, "", errors.New("ACME 账户密钥无效")
 		}
 		key, err = x509.ParseECPrivateKey(block.Bytes)
 		if err != nil {
@@ -569,7 +569,7 @@ func (c *acmeClient) nonce(ctx context.Context) (string, error) {
 	resp.Body.Close()
 	n := resp.Header.Get("Replay-Nonce")
 	if n == "" {
-		return "", errors.New("ACME server did not return a nonce")
+		return "", errors.New("ACME Server 未返回 nonce")
 	}
 	return n, nil
 }
@@ -593,7 +593,7 @@ func (c *acmeClient) createAccount(ctx context.Context) error {
 	loc := resp.Header.Get("Location")
 	resp.Body.Close()
 	if loc == "" {
-		return errors.New("ACME account response did not contain Location")
+		return errors.New("ACME 账户响应缺少 Location")
 	}
 	c.kid = loc
 	return nil
@@ -608,7 +608,7 @@ func (c *acmeClient) newOrder(ctx context.Context, domain string) (string, acmeO
 	defer resp.Body.Close()
 	loc := resp.Header.Get("Location")
 	if loc == "" {
-		return "", out, errors.New("ACME order missing Location")
+		return "", out, errors.New("ACME 订单响应缺少 Location")
 	}
 	return loc, out, nil
 }

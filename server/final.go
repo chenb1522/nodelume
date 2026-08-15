@@ -13,9 +13,14 @@ import (
 	"time"
 )
 
-func nodeOfflineThreshold(n *PersistNode) time.Duration {
+func nodeOfflineThreshold(n *PersistNode, rt *RuntimeNode) time.Duration {
 	sec := 2
-	if n != nil && n.ReportIntervalSec > 0 {
+	// Prefer the interval the Agent has actually reported. The desired interval
+	// can change before the Agent applies it, and using that new value here can
+	// incorrectly mark an otherwise-online node offline during the transition.
+	if rt != nil && rt.Latest.ReportIntervalSec > 0 {
+		sec = rt.Latest.ReportIntervalSec
+	} else if n != nil && n.ReportIntervalSec > 0 {
 		sec = n.ReportIntervalSec
 	}
 	d := time.Duration(sec*3) * time.Second
@@ -25,7 +30,7 @@ func nodeOfflineThreshold(n *PersistNode) time.Duration {
 	return d
 }
 func nodeIsOnline(n *PersistNode, rt *RuntimeNode) bool {
-	return n != nil && n.Registered && rt != nil && !rt.LastSeen.IsZero() && time.Since(rt.LastSeen) < nodeOfflineThreshold(n)
+	return n != nil && n.Registered && rt != nil && !rt.LastSeen.IsZero() && time.Since(rt.LastSeen) < nodeOfflineThreshold(n, rt)
 }
 
 func domainAccessURL(domain, listen string) string {
@@ -83,13 +88,13 @@ func (a *App) getListenSettings(w http.ResponseWriter, r *http.Request) {
 func parseListen(address string, port int) (string, error) {
 	address = strings.TrimSpace(address)
 	if port < 1 || port > 65535 {
-		return "", fmt.Errorf("port must be 1-65535")
+		return "", fmt.Errorf("端口必须在 1–65535 之间")
 	}
 	if address == "" {
-		return "", fmt.Errorf("listen address is required")
+		return "", fmt.Errorf("请输入监听 IP 地址")
 	}
 	if ip := net.ParseIP(address); ip == nil && address != "localhost" {
-		return "", fmt.Errorf("invalid listen address")
+		return "", fmt.Errorf("请输入有效的监听 IP 地址")
 	}
 	return net.JoinHostPort(address, strconv.Itoa(port)), nil
 }
@@ -110,13 +115,13 @@ func (a *App) saveListenSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := parseListen(in.Address, in.Port)
 	if err != nil {
-		jsonErrorCode(w, "INVALID_LISTEN", err.Error(), "请检查监听地址和端口", 400)
+		jsonErrorCode(w, "INVALID_LISTEN", err.Error(), "", 400)
 		return
 	}
 	if target != a.activeListen && listenPort(target) != listenPort(a.activeListen) {
 		ln, er := net.Listen("tcp", target)
 		if er != nil {
-			jsonErrorCode(w, "PORT_IN_USE", fmt.Sprintf("%s is unavailable: %v", target, er), "请选择未占用端口", 409)
+			jsonErrorCode(w, "PORT_IN_USE", fmt.Sprintf("监听地址 %s 不可用：%v", target, er), "请选择未占用端口", 409)
 			return
 		}
 		_ = ln.Close()
@@ -128,7 +133,7 @@ func (a *App) saveListenSettings(w http.ResponseWriter, r *http.Request) {
 	err = a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "active": a.activeListen, "desired": target, "pending": target != a.activeListen})

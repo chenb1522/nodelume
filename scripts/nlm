@@ -1,44 +1,66 @@
 #!/bin/sh
 set -eu
+usage_server(){ cat <<'TXT'
+NodeLume Server CLI
+
+  nlm server s | status [-d, --detail]      查看状态 / 详细资源占用
+  nlm server u | update [-v, --version VERSION]
+                                             更新到最新或指定版本
+  nlm server r | restart                    重启 Server
+  nlm server rm | uninstall                 卸载 Server（保留数据）
+  nlm server v | version                    查看版本
+  nlm server test                           自检 Server
+  nlm server logs [-f, --follow]            查看运行日志
+  nlm server -h | --help                    查看 Server 帮助
+TXT
+}
+usage_agent(){ cat <<'TXT'
+NodeLume Agent CLI
+
+  nlm agent s | status [-d, --detail]       查看状态 / 详细资源占用
+  nlm agent u | update [-v, --version VERSION]
+                                             更新到最新或指定版本
+  nlm agent r | restart                     重启 Agent
+  nlm agent rm | uninstall                  卸载 Agent（保留配置）
+  nlm agent v | version                     查看版本
+  nlm agent config                          查看脱敏配置
+  nlm agent test                            测试连接
+  nlm agent reconnect                       重新连接
+  nlm agent logs [-f, --follow]             查看日志
+  nlm agent set -s, --server URL            修改 Server 地址
+  nlm agent set -l, --log-level LEVEL       修改日志级别
+  nlm agent bind -s, --server URL -t, --token TOKEN [-n, --name NAME]
+                                             绑定/重新绑定 Server
+  nlm agent -h | --help                     查看 Agent 帮助
+TXT
+}
 usage(){ cat <<'TXT'
 NodeLume CLI
 
-Server
-  nlm server s | status           查看状态
-  nlm server s -d | --detail      查看详细资源占用
-  nlm server u | update           更新到最新版本
-  nlm server u -v VERSION         更新到指定版本
-  nlm server r | restart          重启 Server
-  nlm server rm | uninstall       卸载 Server（保留数据）
-  nlm server v | version          查看版本
-  nlm server test                 自检 Server
-  nlm server logs [-f]            查看运行日志
+  nlm server ...                            管理 NodeLume Server
+  nlm agent ...                             管理 NodeLume Agent
+  nlm -h | --help                           查看总帮助
 
-Agent
-  nlm agent s | status            查看状态
-  nlm agent s -d | --detail       查看详细资源占用
-  nlm agent u | update            更新到最新版本
-  nlm agent u -v VERSION          更新到指定版本
-  nlm agent r | restart           重启 Agent
-  nlm agent rm | uninstall        卸载 Agent（保留配置）
-  nlm agent v | version           查看版本
-  nlm agent config                查看脱敏配置
-  nlm agent test                  测试连接
-  nlm agent reconnect             重新连接
-  nlm agent logs [-f]             查看日志
-  nlm agent set -s URL            修改 Server 地址
-  nlm agent set -l LEVEL          修改日志级别
-  nlm agent bind -s URL -t TOKEN [-n NAME] 绑定/重新绑定 Server
 TXT
+usage_server
+printf '\n'
+usage_agent
 }
 err(){ printf '❌ %s\n' "$*" >&2; }
 [ $# -gt 0 ] || { usage; exit 0; }
 case "$1" in help|-h|--help) usage; exit 0;; esac
 kind=$1; shift
-case "$kind" in server) bin=/usr/local/bin/nodelume-server;svc=nodelume-server;;agent)bin=/usr/local/bin/nodelume-agent;svc=nodelume-agent;;*)usage;exit 2;;esac
+case "$kind" in
+  server) bin=/usr/local/bin/nodelume-server;svc=nodelume-server;;
+  agent)  bin=/usr/local/bin/nodelume-agent;svc=nodelume-agent;;
+  *) usage;exit 2;;
+esac
+case "${1:-}" in
+  help|-h|--help) [ "$kind" = server ] && usage_server || usage_agent; exit 0;;
+esac
 [ -x "$bin" ] || { err "NodeLume $kind 未安装"; exit 1; }
 cmd=${1:-s}; [ $# -gt 0 ] && shift || true
-case "$cmd" in help|-h|--help) usage;exit 0;;esac
+case "$cmd" in help|-h|--help) [ "$kind" = server ] && usage_server || usage_agent;exit 0;;esac
 human_bytes(){ awk -v n="${1:-0}" 'BEGIN{u[0]="B";u[1]="KiB";u[2]="MiB";u[3]="GiB";u[4]="TiB";i=0;while(n>=1024&&i<4){n/=1024;i++}if(i==0||n>=10)printf "%.0f %s",n,u[i];else printf "%.1f %s",n,u[i]}'; }
 read_status(){ f=$1;k=$2; [ -r "$f" ] && sed -n "s/^$k=//p" "$f" | head -1 || true; }
 show_status(){
@@ -46,7 +68,19 @@ show_status(){
   while [ $# -gt 0 ]; do case "$1" in -d|--detail)detail=1;shift;;*)err "未知参数: $1";exit 2;;esac;done
   state=$(systemctl is-active "$svc" 2>/dev/null || true);ver=$($bin --version 2>/dev/null | head -1);pid=$(systemctl show -p MainPID "$svc" 2>/dev/null | sed -n "s/^MainPID=//p" | head -1)
   printf 'NodeLume %s\n────────────────────────────────\n状态      %s\n版本      %s\nPID       %s\n' "$(printf %s "$kind"|awk '{print toupper(substr($0,1,1)) substr($0,2)}')" "${state:-unknown}" "$ver" "${pid:-0}"
-  if [ "$kind" = server ]; then sf=/run/nodelume-server/status.env; printf '监听      %s\n' "$(read_status "$sf" LISTEN)"; else sf=/run/nodelume-agent/status.env;printf '节点      %s\nServer    %s\n间隔      %ss\n' "$(read_status "$sf" NAME)" "$(read_status "$sf" SERVER)" "$(read_status "$sf" INTERVAL)";fi
+  if [ "$kind" = server ]; then
+    sf=/run/nodelume-server/status.env
+    listen=$(read_status "$sf" LISTEN)
+    if [ -z "$listen" ] && [ -r /etc/nodelume/server.env ]; then
+      listen=$(sed -n 's/^NODELUME_LISTEN=//p' /etc/nodelume/server.env | head -1)
+    fi
+    printf '监听      %s\n' "${listen:-未知}"
+  else
+    sf=/run/nodelume-agent/status.env
+    node_name=$(read_status "$sf" NAME)
+    [ -n "$node_name" ] || node_name=$(read_status "$sf" NODE_ID)
+    printf '节点      %s\nServer    %s\n间隔      %ss\n' "${node_name:-未知}" "$(read_status "$sf" SERVER)" "$(read_status "$sf" INTERVAL)"
+  fi
   [ "$detail" -eq 1 ] || return 0
   cpu=$(read_status "$sf" CPU_PERCENT);rss=$(read_status "$sf" RSS_BYTES);disk=$(read_status "$sf" DISK_BYTES);ino=$(read_status "$sf" INODES);rx=$(read_status "$sf" RX_BYTES);tx=$(read_status "$sf" TX_BYTES);rr=$(read_status "$sf" RX_RATE);tr=$(read_status "$sf" TX_RATE)
   if [ -z "$rss" ] && [ "${pid:-0}" -gt 0 ] 2>/dev/null; then rss=$(awk '/VmRSS/{print $2*1024;exit}' /proc/$pid/status 2>/dev/null || echo 0);cpu=$(ps -p "$pid" -o %cpu= 2>/dev/null|awk '{print $1}');fi

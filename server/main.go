@@ -29,7 +29,7 @@ import (
 	"time"
 )
 
-var serverVersion = "1.0.1"
+var serverVersion = "1.0.2"
 var releaseRepo = "chenb1522/nodelume"
 
 const protocolVersion = 1
@@ -110,6 +110,7 @@ type PersistedState struct {
 	Nodes              map[string]*PersistNode      `json:"nodes"`
 	Enrollments        map[string]Enrollment        `json:"enrollments"`
 	EnrollmentReceipts map[string]EnrollmentReceipt `json:"enrollment_receipts,omitempty"`
+	Sessions           map[string]Session           `json:"sessions,omitempty"`
 	Audit              []AuditEntry                 `json:"audit,omitempty"`
 }
 
@@ -163,26 +164,30 @@ type SelfStats struct {
 }
 
 type Heartbeat struct {
-	Time        int64            `json:"time"`
-	CPU         float64          `json:"cpu"`
-	Memory      float64          `json:"memory"`
-	MemoryUsed  uint64           `json:"memory_used"`
-	MemoryAvail uint64           `json:"memory_available"`
-	Disk        float64          `json:"disk"`
-	DiskUsed    uint64           `json:"disk_used"`
-	DiskTotal   uint64           `json:"disk_total"`
-	Temperature *float64         `json:"temperature,omitempty"`
-	Load1       float64          `json:"load1"`
-	Load5       float64          `json:"load5"`
-	Load15      float64          `json:"load15"`
-	NetIn       float64          `json:"net_in"`
-	NetOut      float64          `json:"net_out"`
-	Uptime      float64          `json:"uptime"`
-	Processes   int              `json:"processes"`
-	TopCPU      []ProcessSummary `json:"top_cpu"`
-	TopMemory   []ProcessSummary `json:"top_memory"`
-	System      SystemInfo       `json:"system"`
-	Self        SelfStats        `json:"self,omitempty"`
+	Time              int64            `json:"time"`
+	CPU               float64          `json:"cpu"`
+	CPUFreqMHz        float64          `json:"cpu_freq_mhz,omitempty"`
+	Memory            float64          `json:"memory"`
+	MemoryUsed        uint64           `json:"memory_used"`
+	MemoryAvail       uint64           `json:"memory_available"`
+	SwapUsed          uint64           `json:"swap_used,omitempty"`
+	SwapTotal         uint64           `json:"swap_total,omitempty"`
+	Disk              float64          `json:"disk"`
+	DiskUsed          uint64           `json:"disk_used"`
+	DiskTotal         uint64           `json:"disk_total"`
+	Temperature       *float64         `json:"temperature,omitempty"`
+	Load1             float64          `json:"load1"`
+	Load5             float64          `json:"load5"`
+	Load15            float64          `json:"load15"`
+	NetIn             float64          `json:"net_in"`
+	NetOut            float64          `json:"net_out"`
+	Uptime            float64          `json:"uptime"`
+	Processes         int              `json:"processes"`
+	ReportIntervalSec int              `json:"report_interval_sec,omitempty"`
+	TopCPU            []ProcessSummary `json:"top_cpu"`
+	TopMemory         []ProcessSummary `json:"top_memory"`
+	System            SystemInfo       `json:"system"`
+	Self              SelfStats        `json:"self,omitempty"`
 }
 
 type MetricPoint struct {
@@ -288,8 +293,8 @@ func newRuntimeNode() *RuntimeNode {
 }
 
 type Session struct {
-	CSRF    string
-	Expires time.Time
+	CSRF    string    `json:"csrf"`
+	Expires time.Time `json:"expires"`
 }
 type LoginFail struct {
 	Count  int
@@ -300,7 +305,6 @@ type App struct {
 	mu                                                                                                sync.RWMutex
 	state                                                                                             PersistedState
 	runtime                                                                                           map[string]*RuntimeNode
-	sessions                                                                                          map[string]Session
 	loginFails                                                                                        map[string]LoginFail
 	dataPath, acmeDir, updateRequestPath, updateStatusPath, listen, activeListen, configuredPublicURL string
 	handler                                                                                           http.Handler
@@ -363,11 +367,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		fmt.Println("release verification OK")
+		fmt.Println("发布文件校验通过")
 		return
 	}
 
-	a := &App{dataPath: *data, acmeDir: *acmeDir, updateRequestPath: *updateRequest, updateStatusPath: *updateStatus, listen: *listen, activeListen: *listen, configuredPublicURL: strings.TrimRight(*publicURL, "/"), runtime: map[string]*RuntimeNode{}, sessions: map[string]Session{}, loginFails: map[string]LoginFail{}, nonces: map[string]int64{}, enrollRate: map[string][]int64{}}
+	a := &App{dataPath: *data, acmeDir: *acmeDir, updateRequestPath: *updateRequest, updateStatusPath: *updateStatus, listen: *listen, activeListen: *listen, configuredPublicURL: strings.TrimRight(*publicURL, "/"), runtime: map[string]*RuntimeNode{}, loginFails: map[string]LoginFail{}, nonces: map[string]int64{}, enrollRate: map[string][]int64{}}
 	if err := a.load(); err != nil {
 		log.Fatalf("load state: %v", err)
 	}
@@ -486,7 +490,7 @@ func (a *App) serveIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := webFS.ReadFile("web/index.html")
 	if err != nil {
-		http.Error(w, "UI unavailable", 500)
+		http.Error(w, "界面资源不可用", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -514,7 +518,7 @@ func (a *App) serveAsset(w http.ResponseWriter, r *http.Request) {
 func (a *App) load() error {
 	b, err := os.ReadFile(a.dataPath)
 	if errors.Is(err, os.ErrNotExist) {
-		a.state = PersistedState{Settings: Settings{Listen: a.listen, AdminPath: "/", HTTPSMode: "off", ReleaseRepo: releaseRepo, LogRetentionDays: 7, LogMaxMiB: 50, ConfigVersion: 3}, Nodes: map[string]*PersistNode{}, Enrollments: map[string]Enrollment{}, EnrollmentReceipts: map[string]EnrollmentReceipt{}}
+		a.state = PersistedState{Settings: Settings{Listen: a.listen, AdminPath: "/", HTTPSMode: "off", ReleaseRepo: releaseRepo, LogRetentionDays: 7, LogMaxMiB: 50, ConfigVersion: 3}, Nodes: map[string]*PersistNode{}, Enrollments: map[string]Enrollment{}, EnrollmentReceipts: map[string]EnrollmentReceipt{}, Sessions: map[string]Session{}}
 		return nil
 	}
 	if err != nil {
@@ -531,6 +535,9 @@ func (a *App) load() error {
 	}
 	if a.state.EnrollmentReceipts == nil {
 		a.state.EnrollmentReceipts = map[string]EnrollmentReceipt{}
+	}
+	if a.state.Sessions == nil {
+		a.state.Sessions = map[string]Session{}
 	}
 	if a.state.Settings.AdminPath == "" {
 		a.state.Settings.AdminPath = "/"
@@ -587,20 +594,20 @@ func (a *App) setupPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(in.Password) < 8 || len(in.Password) > 128 {
-		jsonError(w, "password must be 8-128 characters", 400)
+		jsonError(w, "密码长度必须为 8–128 位", 400)
 		return
 	}
 	ip := a.remoteIP(r)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.state.Password.Hash != "" {
-		jsonError(w, "already initialized", 409)
+		jsonError(w, "管理员密码已经初始化", 409)
 		return
 	}
 	a.state.Password = makePassword(in.Password)
 	a.auditLocked(ip, "setup_password", "", "initial administrator password created", "success")
 	if err := a.saveLocked(); err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -628,11 +635,11 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	rec := a.state.Password
 	a.mu.RUnlock()
 	if !initialized {
-		jsonError(w, "not initialized", 428)
+		jsonError(w, "尚未初始化管理员密码", 428)
 		return
 	}
 	if f.Banned {
-		jsonError(w, "source IP is banned until NodeLume Server restarts", 429)
+		jsonError(w, "该来源 IP 已被封禁，重启 NodeLume Server 后解除", 429)
 		return
 	}
 	var in struct {
@@ -654,16 +661,16 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		time.Sleep(300 * time.Millisecond)
 		if f.Banned {
-			jsonError(w, "source IP is banned until server restart", 429)
+			jsonError(w, "该来源 IP 已被封禁，重启 NodeLume Server 后解除", 429)
 		} else {
-			jsonError(w, fmt.Sprintf("invalid password (%d/3)", f.Count), 401)
+			jsonError(w, fmt.Sprintf("密码错误（%d/3）", f.Count), 401)
 		}
 		return
 	}
 	sid, csrf := randomToken(32), randomToken(24)
 	a.mu.Lock()
 	delete(a.loginFails, ip)
-	a.sessions[sid] = Session{CSRF: csrf, Expires: time.Now().Add(12 * time.Hour)}
+	a.state.Sessions[sid] = Session{CSRF: csrf, Expires: time.Now().Add(12 * time.Hour)}
 	a.auditLocked(ip, "login", "", "administrator login", "success")
 	_ = a.saveLocked()
 	a.mu.Unlock()
@@ -674,7 +681,7 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	ip := a.remoteIP(r)
 	if c, err := r.Cookie("nodelume_session"); err == nil {
 		a.mu.Lock()
-		delete(a.sessions, c.Value)
+		delete(a.state.Sessions, c.Value)
 		a.auditLocked(ip, "logout", "", "administrator logout", "success")
 		_ = a.saveLocked()
 		a.mu.Unlock()
@@ -688,7 +695,7 @@ func (a *App) getSession(r *http.Request) (Session, bool) {
 		return Session{}, false
 	}
 	a.mu.RLock()
-	s, ok := a.sessions[c.Value]
+	s, ok := a.state.Sessions[c.Value]
 	a.mu.RUnlock()
 	if !ok || time.Now().After(s.Expires) {
 		return Session{}, false
@@ -698,7 +705,7 @@ func (a *App) getSession(r *http.Request) (Session, bool) {
 func (a *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := a.getSession(r); !ok {
-			jsonError(w, "unauthorized", 401)
+			jsonError(w, "登录状态已失效，请重新登录", 401)
 			return
 		}
 		next(w, r)
@@ -708,7 +715,7 @@ func (a *App) requireAuthCSRF(next http.HandlerFunc) http.HandlerFunc {
 	return a.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		s, _ := a.getSession(r)
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(s.CSRF)) != 1 {
-			jsonError(w, "bad csrf token", 403)
+			jsonError(w, "安全令牌无效，请刷新页面后重试", 403)
 			return
 		}
 		next(w, r)
@@ -741,7 +748,7 @@ func (a *App) saveSecuritySettings(w http.ResponseWriter, r *http.Request) {
 		p = "/"
 	}
 	if p != "/" && !validAdminPath(p) {
-		jsonError(w, "invalid admin path", 400)
+		jsonError(w, "管理入口格式无效", 400)
 		return
 	}
 	ip := a.remoteIP(r)
@@ -755,42 +762,34 @@ func (a *App) saveSecuritySettings(w http.ResponseWriter, r *http.Request) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "admin_path": p})
 }
 func (a *App) changePassword(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Current string `json:"current"`
-		New     string `json:"new"`
+		New string `json:"new"`
 	}
 	if !decodeJSON(w, r, &in, 1<<14) {
 		return
 	}
 	if len(in.New) < 8 || len(in.New) > 128 {
-		jsonError(w, "new password must be 8-128 characters", 400)
+		jsonError(w, "新密码长度必须为 8–128 位", 400)
 		return
 	}
 	ip := a.remoteIP(r)
 	a.mu.Lock()
-	if !checkPassword(in.Current, a.state.Password) {
-		a.auditLocked(ip, "change_password", "", "current password rejected", "failed")
-		_ = a.saveLocked()
-		a.mu.Unlock()
-		jsonError(w, "current password is incorrect", 403)
-		return
-	}
 	a.state.Password = makePassword(in.New)
-	a.sessions = map[string]Session{}
+	a.state.Sessions = map[string]Session{}
 	a.auditLocked(ip, "change_password", "", "administrator password changed; sessions revoked", "success")
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "nodelume_session", Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "nodelume_session", Value: "", Path: "/", HttpOnly: true, Secure: a.isHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 func (a *App) auditLog(w http.ResponseWriter, r *http.Request) {
@@ -802,17 +801,18 @@ func (a *App) auditLog(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 	type V struct {
-		ID                  string     `json:"id"`
-		Name                string     `json:"name"`
-		Group               string     `json:"group"`
-		Note                string     `json:"note"`
-		Status              string     `json:"status"`
-		ReportIntervalSec   int        `json:"report_interval_sec"`
-		OfflineThresholdSec int        `json:"offline_threshold_sec"`
-		CreatedAt           int64      `json:"created_at"`
-		LastSeen            int64      `json:"last_seen"`
-		Latest              Heartbeat  `json:"latest"`
-		System              SystemInfo `json:"system"`
+		ID                       string     `json:"id"`
+		Name                     string     `json:"name"`
+		Group                    string     `json:"group"`
+		Note                     string     `json:"note"`
+		Status                   string     `json:"status"`
+		ReportIntervalSec        int        `json:"report_interval_sec"`
+		AppliedReportIntervalSec int        `json:"applied_report_interval_sec,omitempty"`
+		OfflineThresholdSec      int        `json:"offline_threshold_sec"`
+		CreatedAt                int64      `json:"created_at"`
+		LastSeen                 int64      `json:"last_seen"`
+		Latest                   Heartbeat  `json:"latest"`
+		System                   SystemInfo `json:"system"`
 	}
 	a.mu.RLock()
 	out := make([]V, 0, len(a.state.Nodes))
@@ -833,7 +833,8 @@ func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		out = append(out, V{ID: id, Name: n.Name, Group: n.Group, Note: n.Note, Status: status, ReportIntervalSec: n.ReportIntervalSec, OfflineThresholdSec: int(nodeOfflineThreshold(n) / time.Second), CreatedAt: n.CreatedAt, LastSeen: last, Latest: latest, System: n.System})
+		appliedInterval := latest.ReportIntervalSec
+		out = append(out, V{ID: id, Name: n.Name, Group: n.Group, Note: n.Note, Status: status, ReportIntervalSec: n.ReportIntervalSec, AppliedReportIntervalSec: appliedInterval, OfflineThresholdSec: int(nodeOfflineThreshold(n, rt) / time.Second), CreatedAt: n.CreatedAt, LastSeen: last, Latest: latest, System: n.System})
 	}
 	a.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
@@ -843,7 +844,7 @@ func (a *App) enrollmentBaseURL(r *http.Request) (string, error) {
 	base := strings.TrimRight(a.baseURL(r), "/")
 	u, err := url.Parse(base)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", errors.New("invalid public Server URL")
+		return "", errors.New("公网 Server 地址无效")
 	}
 	return base, nil
 }
@@ -859,7 +860,7 @@ func (a *App) createNode(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Name = strings.TrimSpace(in.Name)
 	if len(in.Name) > 80 {
-		jsonError(w, "name must be at most 80 characters", 400)
+		jsonError(w, "节点名称不能超过 80 个字符", 400)
 		return
 	}
 	id := randomHex(12)
@@ -877,7 +878,7 @@ func (a *App) createNode(w http.ResponseWriter, r *http.Request) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": id, "token": token, "install_command": a.agentInstallCommand(r, token), "expires_in": 1800})
@@ -894,7 +895,7 @@ func (a *App) reenrollNode(w http.ResponseWriter, r *http.Request) {
 	n := a.state.Nodes[id]
 	if n == nil {
 		a.mu.Unlock()
-		jsonError(w, "node not found", 404)
+		jsonError(w, "节点不存在", 404)
 		return
 	}
 	// Keep the current Agent credential valid until the new one successfully enrolls.
@@ -908,7 +909,7 @@ func (a *App) reenrollNode(w http.ResponseWriter, r *http.Request) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"token": token, "install_command": a.agentInstallCommand(r, token), "expires_in": 1800})
@@ -920,7 +921,7 @@ func (a *App) deleteNode(w http.ResponseWriter, r *http.Request) {
 	n := a.state.Nodes[id]
 	if n == nil {
 		a.mu.Unlock()
-		jsonError(w, "node not found", 404)
+		jsonError(w, "节点不存在", 404)
 		return
 	}
 	delete(a.state.Nodes, id)
@@ -934,7 +935,7 @@ func (a *App) deleteNode(w http.ResponseWriter, r *http.Request) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -952,7 +953,7 @@ func (a *App) nodeHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.RUnlock()
 	if rt == nil {
-		jsonError(w, "node not found", 404)
+		jsonError(w, "节点不存在", 404)
 		return
 	}
 	writeJSON(w, 200, out)
@@ -963,7 +964,7 @@ func (a *App) nodeProcesses(w http.ResponseWriter, r *http.Request) {
 func (a *App) nodeProcessInfo(w http.ResponseWriter, r *http.Request) {
 	pid, err := strconv.Atoi(r.PathValue("pid"))
 	if err != nil || pid < 1 {
-		jsonError(w, "invalid pid", 400)
+		jsonError(w, "PID 无效", 400)
 		return
 	}
 	a.commandJSON(w, r, "process_info", AgentCommand{PID: pid}, 8*time.Second)
@@ -971,7 +972,7 @@ func (a *App) nodeProcessInfo(w http.ResponseWriter, r *http.Request) {
 func (a *App) nodeProcessAction(w http.ResponseWriter, r *http.Request) {
 	pid, err := strconv.Atoi(r.PathValue("pid"))
 	if err != nil || pid <= 1 {
-		jsonError(w, "invalid or protected pid", 400)
+		jsonError(w, "PID 无效或该进程受保护", 400)
 		return
 	}
 	var in struct {
@@ -983,7 +984,7 @@ func (a *App) nodeProcessAction(w http.ResponseWriter, r *http.Request) {
 	actionMap := map[string]string{"terminate": "process_terminate", "kill": "process_kill", "restart": "process_restart", "service_stop": "service_stop", "service_restart": "service_restart"}
 	act := actionMap[in.Action]
 	if act == "" {
-		jsonError(w, "unsupported process action", 400)
+		jsonError(w, "不支持的进程操作", 400)
 		return
 	}
 	cmd := AgentCommand{PID: pid}
@@ -1012,7 +1013,7 @@ func (a *App) nodeStopped(w http.ResponseWriter, r *http.Request) {
 func (a *App) nodeStartStopped(w http.ResponseWriter, r *http.Request) {
 	rid := r.PathValue("rid")
 	if len(rid) < 8 || len(rid) > 80 {
-		jsonError(w, "invalid restart id", 400)
+		jsonError(w, "恢复记录无效", 400)
 		return
 	}
 	res, err := a.sendCommand(r.PathValue("id"), "process_start_saved", AgentCommand{RestartID: rid}, 15*time.Second)
@@ -1065,10 +1066,10 @@ func (a *App) sendCommand(nodeID, action string, cmd AgentCommand, timeout time.
 	online := n != nil && nodeIsOnline(n, rt)
 	a.mu.RUnlock()
 	if rt == nil {
-		return AgentResult{}, errors.New("node not found")
+		return AgentResult{}, errors.New("节点不存在")
 	}
 	if !online {
-		return AgentResult{}, errors.New("node is offline")
+		return AgentResult{}, errors.New("节点离线")
 	}
 	cmd.Protocol = protocolVersion
 	cmd.ID = randomHex(12)
@@ -1082,13 +1083,13 @@ func (a *App) sendCommand(nodeID, action string, cmd AgentCommand, timeout time.
 	select {
 	case rt.Commands <- cmd:
 	default:
-		return AgentResult{}, errors.New("node command queue is busy")
+		return AgentResult{}, errors.New("节点命令队列繁忙，请稍后重试")
 	}
 	select {
 	case res := <-ch:
 		return res, nil
 	case <-time.After(timeout):
-		return AgentResult{}, errors.New("agent command timeout")
+		return AgentResult{}, errors.New("等待 Agent 响应超时")
 	}
 }
 
@@ -1136,7 +1137,7 @@ func (a *App) agentRegister(w http.ResponseWriter, r *http.Request) {
 		if rec, ok := a.state.EnrollmentReceipts[receiptKey]; ok && rec.ExpiresAt > now {
 			if n := a.state.Nodes[rec.NodeID]; n != nil {
 				a.mu.Unlock()
-				writeJSON(w, 200, map[string]any{"node_id": rec.NodeID, "secret": rec.Secret, "server_version": serverVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": n.ReportIntervalSec})
+				writeJSON(w, 200, map[string]any{"node_id": rec.NodeID, "node_name": n.Name, "secret": rec.Secret, "server_version": serverVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": n.ReportIntervalSec})
 				return
 			}
 		}
@@ -1202,13 +1203,13 @@ func (a *App) agentRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	a.auditLocked(a.remoteIP(r), "agent_register", n.Name, in.System.OS+" / "+in.System.Arch, "success")
 	err := a.saveLocked()
-	id, interval := n.ID, n.ReportIntervalSec
+	id, name, interval := n.ID, n.Name, n.ReportIntervalSec
 	a.mu.Unlock()
 	if err != nil {
 		jsonErrorCode(w, "IDENTITY_SAVE_FAILED", "Server 无法保存 Agent 身份", "请检查 Server 数据目录权限和磁盘空间", 500)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"node_id": id, "secret": secret, "server_version": serverVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": interval})
+	writeJSON(w, 200, map[string]any{"node_id": id, "node_name": name, "secret": secret, "server_version": serverVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": interval})
 }
 func (a *App) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id, authFail := a.authAgentDetailed(r)
@@ -1255,8 +1256,12 @@ func (a *App) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		rt.History.Add(p)
 		rt.LastHistory = now
 	}
-	if n := a.state.Nodes[id]; n != nil && hb.System.Hostname != "" {
-		n.System = hb.System
+	name := ""
+	if n := a.state.Nodes[id]; n != nil {
+		name = n.Name
+		if hb.System.Hostname != "" {
+			n.System = hb.System
+		}
 	}
 	desired := a.desiredAgentURLLocked()
 	interval := 2
@@ -1264,7 +1269,7 @@ func (a *App) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		interval = n.ReportIntervalSec
 	}
 	a.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"ok": true, "server_url": desired, "server_protocol": protocolVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": interval})
+	writeJSON(w, 200, map[string]any{"ok": true, "node_name": name, "server_url": desired, "server_protocol": protocolVersion, "protocol_min": protocolVersion, "protocol_max": protocolVersion, "report_interval_sec": interval, "heartbeat_extensions": true})
 }
 func (a *App) agentCommands(w http.ResponseWriter, r *http.Request) {
 	id, authFail := a.authAgentDetailed(r)
@@ -1280,7 +1285,7 @@ func (a *App) agentCommands(w http.ResponseWriter, r *http.Request) {
 	rt := a.runtime[id]
 	a.mu.RUnlock()
 	if rt == nil {
-		jsonError(w, "node not found", 404)
+		jsonError(w, "节点不存在", 404)
 		return
 	}
 	select {
@@ -1306,7 +1311,7 @@ func (a *App) agentResults(w http.ResponseWriter, r *http.Request) {
 	rt := a.runtime[id]
 	a.mu.RUnlock()
 	if rt == nil {
-		jsonError(w, "node not found", 404)
+		jsonError(w, "节点不存在", 404)
 		return
 	}
 	rt.pendingMu.Lock()
@@ -1366,9 +1371,10 @@ func (a *App) maintenance() {
 				dirty = true
 			}
 		}
-		for k, s := range a.sessions {
+		for k, s := range a.state.Sessions {
 			if now.After(s.Expires) {
-				delete(a.sessions, k)
+				delete(a.state.Sessions, k)
+				dirty = true
 			}
 		}
 		if dirty {
@@ -1409,7 +1415,13 @@ func (a *App) agentInstallCommand(r *http.Request, token string) string {
 		repo = releaseRepo
 	}
 	raw := "https://github.com/" + repo + "/releases/download/v" + serverVersion + "/install-agent.sh"
-	return fmt.Sprintf("curl -fsSL %s | sh -s -- --server %s --token %s --version v%s --repo %s", shellQuote(raw), shellQuote(base), shellQuote(token), serverVersion, shellQuote(repo))
+	cmd := fmt.Sprintf("curl -fsSL %s | sh -s -- --server %s --token %s --version v%s", shellQuote(raw), shellQuote(base), shellQuote(token), serverVersion)
+	// Keep the default repository out of normal user-facing commands, while
+	// preserving custom/fork repository support.
+	if repo != releaseRepo {
+		cmd += " --repo " + shellQuote(repo)
+	}
+	return cmd
 }
 
 func (a *App) remoteIP(r *http.Request) string {
@@ -1460,7 +1472,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any, max int64) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		jsonError(w, "invalid json", 400)
+		jsonError(w, "请求数据格式无效", 400)
 		return false
 	}
 	return true
@@ -1512,7 +1524,7 @@ func envOr(k, d string) string {
 	return d
 }
 func validAdminPath(p string) bool {
-	if len(p) < 5 || len(p) > 49 || p[0] != '/' {
+	if len(p) < 2 || len(p) > 49 || p[0] != '/' {
 		return false
 	}
 	for _, r := range p[1:] {
@@ -1679,7 +1691,7 @@ func (a *App) editNode(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Name, in.Group, in.Note = strings.TrimSpace(in.Name), strings.TrimSpace(in.Group), strings.TrimSpace(in.Note)
 	if in.Name == "" || len(in.Name) > 80 || len(in.Group) > 64 || len(in.Note) > 300 {
-		jsonError(w, "invalid node metadata", 400)
+		jsonError(w, "节点信息格式无效", 400)
 		return
 	}
 	if in.ReportIntervalSec == 0 {
@@ -1687,47 +1699,50 @@ func (a *App) editNode(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed := map[int]bool{2: true, 5: true, 10: true, 30: true, 60: true}
 	if !allowed[in.ReportIntervalSec] {
-		jsonError(w, "unsupported report interval", 400)
+		jsonError(w, "不支持的上报频率", 400)
 		return
 	}
-	a.mu.RLock()
+
+	// Persist the desired state first. The Agent also receives the desired
+	// interval in every heartbeat, so a transient command failure must not lose
+	// the user's requested configuration or make the UI claim it was applied.
+	a.mu.Lock()
 	n := a.state.Nodes[id]
-	a.mu.RUnlock()
 	if n == nil {
-		jsonError(w, "node not found", 404)
+		a.mu.Unlock()
+		jsonError(w, "节点不存在", 404)
 		return
 	}
-	applied := true
-	a.mu.RLock()
+	oldName := n.Name
+	oldInterval := n.ReportIntervalSec
+	registered := n.Registered
 	rt := a.runtime[id]
 	online := nodeIsOnline(n, rt)
-	a.mu.RUnlock()
-	if n.Registered && n.ReportIntervalSec != in.ReportIntervalSec && online {
-		res, err := a.sendCommand(id, "set_report_interval", AgentCommand{Interval: in.ReportIntervalSec}, 10*time.Second)
-		if err != nil || !res.OK {
-			if err != nil {
-				jsonError(w, err.Error(), 409)
-			} else {
-				jsonError(w, res.Error, 409)
-			}
-			return
-		}
-	} else if n.Registered && n.ReportIntervalSec != in.ReportIntervalSec {
-		applied = false
+	intervalChanged := oldInterval != in.ReportIntervalSec
+	appliedInterval := 0
+	if rt != nil {
+		appliedInterval = rt.Latest.ReportIntervalSec
 	}
-	a.mu.Lock()
-	n = a.state.Nodes[id]
-	old := n.Name
 	n.Name = in.Name
 	n.Group = in.Group
 	n.Note = in.Note
 	n.ReportIntervalSec = in.ReportIntervalSec
-	a.auditLocked(a.remoteIP(r), "edit_node", n.Name, fmt.Sprintf("%s -> %s; report %ds", old, n.Name, in.ReportIntervalSec), "success")
+	a.auditLocked(a.remoteIP(r), "edit_node", n.Name, fmt.Sprintf("%s -> %s; report %ds", oldName, n.Name, in.ReportIntervalSec), "success")
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
+	}
+
+	applied := !registered || appliedInterval == in.ReportIntervalSec
+	// A heartbeat can briefly report the previous interval after the desired
+	// value changes. Always dispatch a changed target; also re-send when the
+	// latest heartbeat still disagrees with an unchanged target.
+	if registered && online && (intervalChanged || !applied) {
+		if res, cmdErr := a.sendCommand(id, "set_report_interval", AgentCommand{Interval: in.ReportIntervalSec}, 10*time.Second); cmdErr == nil && res.OK {
+			applied = true
+		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "applied": applied, "pending": !applied})
 }
@@ -1761,7 +1776,7 @@ func (a *App) setCommonEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Days != 0 && in.Days != 1 && in.Days != 7 && in.Days != 30 {
-		jsonError(w, "days must be 0, 1, 7, or 30", 400)
+		jsonError(w, "Token 有效期必须为永久、1 天、7 天或 30 天", 400)
 		return
 	}
 	token := randomToken(32)
@@ -1780,7 +1795,7 @@ func (a *App) setCommonEnrollment(w http.ResponseWriter, r *http.Request) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"token": token, "expires_at": exp, "install_command": a.agentInstallCommand(r, token)})
@@ -1796,7 +1811,7 @@ func (a *App) revokeCommonEnrollment(w http.ResponseWriter, r *http.Request) {
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -1813,7 +1828,7 @@ func (a *App) saveLogSettings(w http.ResponseWriter, r *http.Request) {
 	days := map[int]bool{1: true, 3: true, 7: true, 14: true, 30: true}
 	caps := map[int]bool{10: true, 25: true, 50: true, 100: true, 200: true, 500: true}
 	if !days[in.RetentionDays] || !caps[in.MaxMiB] {
-		jsonError(w, "unsupported log settings", 400)
+		jsonError(w, "不支持的日志设置", 400)
 		return
 	}
 	a.mu.Lock()
@@ -1826,7 +1841,7 @@ func (a *App) saveLogSettings(w http.ResponseWriter, r *http.Request) {
 		a.logWriter.Configure(in.RetentionDays, in.MaxMiB)
 	}
 	if err != nil {
-		jsonError(w, "save failed", 500)
+		jsonError(w, "保存失败", 500)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -1845,12 +1860,12 @@ func (a *App) runtimeLogs(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) runtimeLogStream(w http.ResponseWriter, r *http.Request) {
 	if a.logWriter == nil {
-		jsonError(w, "runtime log unavailable", 503)
+		jsonError(w, "运行日志不可用", 503)
 		return
 	}
 	f, ok := w.(http.Flusher)
 	if !ok {
-		jsonError(w, "streaming unavailable", 500)
+		jsonError(w, "实时日志流不可用", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

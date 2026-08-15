@@ -227,7 +227,7 @@ func runAgentSubcommand(args []string) int {
 	args = args[1:]
 	path := cliConfigPath(&args)
 	if cmd == "help" {
-		fmt.Print("NodeLume Agent CLI\n  status\n  config\n  test [-s URL]\n  bind -s URL -t TOKEN [-n NAME]\n  set -s URL | -l LEVEL\n  version\n")
+		fmt.Print("NodeLume Agent CLI\n  status\n  config\n  test [-s, --server URL]\n  bind -s, --server URL -t, --token TOKEN [-n, --name NAME]\n  set -s, --server URL | -l, --log-level LEVEL\n  version\n")
 		return 0
 	}
 	if cmd == "version" {
@@ -442,7 +442,7 @@ func testServer(base string, cfg Config) error {
 		return err
 	}
 	if h.Protocol != protocolVersion {
-		return fmt.Errorf("SERVER_PROTOCOL_TOO_OLD/AGENT_PROTOCOL_TOO_OLD: Server Protocol %d, Agent Protocol %d", h.Protocol, protocolVersion)
+		return fmt.Errorf("SERVER_PROTOCOL_TOO_OLD/AGENT_PROTOCOL_TOO_OLD: Server Protocol %d 与 Agent Protocol %d 不兼容", h.Protocol, protocolVersion)
 	}
 	if cfg.NodeID != "" && cfg.Secret != "" {
 		return testAuthenticatedServer(base, cfg)

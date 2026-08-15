@@ -1,4 +1,4 @@
-# NodeLume v1.0.1
+# NodeLume v1.0.2
 
 **轻量多节点 Linux 服务器监控与管理工具**
 
@@ -21,7 +21,7 @@ NodeLume 由静态 Go Server、静态 Go Agent 和原生 Web UI 组成，重点�
 ## 安装 Server
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chenb1522/nodelume/v1.0.1/scripts/install-server.sh | sh
+curl -fsSL https://raw.githubusercontent.com/chenb1522/nodelume/v1.0.2/scripts/install-server.sh | sh
 ```
 
 首次无参数安装默认监听 `0.0.0.0`，自动选择当前未占用端口并持久化。重复执行同版本不会重装或重启；旧版本升级会保留配置并在启动/健康检查失败时回滚。
@@ -43,7 +43,7 @@ nlm help            查看完整帮助
 Agent 支持完全无参数安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chenb1522/nodelume/v1.0.1/scripts/install-agent.sh | sh
+curl -fsSL https://raw.githubusercontent.com/chenb1522/nodelume/v1.0.2/scripts/install-agent.sh | sh
 ```
 
 无参数安装完成后状态为“未绑定”，之后执行：
@@ -55,7 +55,7 @@ nlm agent bind -s http://SERVER:PORT -t TOKEN
 也可以在安装时直接绑定：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chenb1522/nodelume/v1.0.1/scripts/install-agent.sh | sh -s -- \
+curl -fsSL https://raw.githubusercontent.com/chenb1522/nodelume/v1.0.2/scripts/install-agent.sh | sh -s -- \
   -s 'https://monitor.example.com' \
   -t 'TOKEN' \
   -n 'HK-01'

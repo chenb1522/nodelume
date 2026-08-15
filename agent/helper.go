@@ -38,6 +38,14 @@ type serviceState struct {
 
 var unitRE = regexp.MustCompile(`^[A-Za-z0-9_.@-]+\.service$`)
 
+func isManagedUnit(unit string) bool {
+	return strings.HasPrefix(strings.ToLower(unit), "nlm-managed-") && unitRE.MatchString(unit)
+}
+
+func quoteShellArg(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "'\\''") + "'"
+}
+
 func helperSocketPath() string {
 	if v := os.Getenv("NODELUME_HELPER_SOCKET"); v != "" {
 		return v
@@ -62,7 +70,7 @@ func runHelper(socketOverride string) error {
 	} else if os.Getenv("LISTEN_FDS") != "" {
 		f := os.NewFile(uintptr(3), "nodelume-helper.socket")
 		if f == nil {
-			return errors.New("systemd socket fd unavailable")
+			return errors.New("systemd socket fd 不可用")
 		}
 		ln, err = net.FileListener(f)
 		_ = f.Close()
@@ -70,7 +78,7 @@ func runHelper(socketOverride string) error {
 			return err
 		}
 	} else {
-		return errors.New("helper requires systemd socket activation")
+		return errors.New("Helper 需要由 systemd socket 激活")
 	}
 	defer ln.Close()
 
@@ -146,16 +154,18 @@ func handleHelperConn(c net.Conn) {
 		out, err = startSaved(req.RestartID)
 	case "service_stop", "service_restart":
 		if req.PID <= 0 {
-			err = errors.New("pid required")
+			err = errors.New("缺少 PID")
 		} else {
 			d, er := readProcessDetail(req.PID)
 			if er != nil {
 				err = er
 			} else if d.Service == "" {
-				err = errors.New("process is not associated with a systemd service")
+				err = errors.New("该进程未关联 systemd 服务")
 			} else if req.Action == "service_stop" {
-				if !safeService(d.Service) {
-					err = errors.New("service is protected or invalid")
+				if isManagedUnit(d.Service) {
+					out, err = stopProcess(req.PID, syscall.SIGTERM)
+				} else if !safeService(d.Service) {
+					err = errors.New("服务受保护或名称无效")
 				} else {
 					rec := storedRecord{StoppedRecord: StoppedRecord{
 						ID: fmt.Sprintf("%d-%d", time.Now().UnixNano(), req.PID), Name: d.Name,
@@ -165,7 +175,7 @@ func handleHelperConn(c net.Conn) {
 					// Persist the recovery record before stopping the service. If we cannot
 					// persist a safe recovery path, do not perform the destructive action.
 					if er := saveStopped(rec); er != nil {
-						err = fmt.Errorf("cannot save service recovery record: %w", er)
+						err = fmt.Errorf("无法保存服务恢复记录: %w", er)
 					} else {
 						out, err = serviceAction(d.Service, "stop")
 						if err != nil {
@@ -179,7 +189,7 @@ func handleHelperConn(c net.Conn) {
 		}
 	case "agent_upgrade":
 		if !validVersion(req.Version) || !validRepo(req.Repo) {
-			err = errors.New("invalid update target")
+			err = errors.New("更新目标无效")
 		} else {
 			err = performAgentUpgrade(strings.TrimPrefix(req.Version, "v"), req.Repo, "/etc/nodelume/release.pub", true)
 			if err == nil {
@@ -190,7 +200,7 @@ func handleHelperConn(c net.Conn) {
 		err = commitAgentUpdate()
 		out = map[string]any{"status": "committed"}
 	default:
-		err = errors.New("unsupported privileged action")
+		err = errors.New("不支持的特权操作")
 	}
 	writeHelper(c, out, err)
 }
@@ -207,7 +217,7 @@ func writeHelper(w io.Writer, out any, err error) {
 
 func readProcessDetail(pid int) (ProcessDetail, error) {
 	if pid <= 0 {
-		return ProcessDetail{}, errors.New("invalid pid")
+		return ProcessDetail{}, errors.New("PID 无效")
 	}
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
@@ -243,6 +253,8 @@ func readProcessDetail(pid int) (ProcessDetail, error) {
 	} else if cgroupContainer {
 		launch = "容器"
 		note = "容器进程由运行时管理，不允许由 NodeLume 直接重启"
+	} else if isManagedUnit(service) {
+		launch = "NodeLume 托管 / 独立进程"
 	} else if service != "" {
 		if ppid == 1 {
 			launch = "systemd 服务"
@@ -523,16 +535,16 @@ func systemctlPath() string {
 }
 func systemdServiceInfo(unit string) (serviceState, error) {
 	if !safeService(unit) {
-		return serviceState{}, errors.New("service is protected or invalid")
+		return serviceState{}, errors.New("服务受保护或名称无效")
 	}
 	p := systemctlPath()
 	if p == "" {
-		return serviceState{}, errors.New("systemd not available")
+		return serviceState{}, errors.New("systemd 不可用")
 	}
 	cmd := exec.Command(p, "show", "--no-pager", "--property=Id,ActiveState,SubState,MainPID", unit)
 	b, err := cmd.Output()
 	if err != nil {
-		return serviceState{}, fmt.Errorf("systemctl show failed")
+		return serviceState{}, fmt.Errorf("读取 systemd 服务状态失败")
 	}
 	m := map[string]string{}
 	for _, l := range strings.Split(string(b), "\n") {
@@ -545,20 +557,20 @@ func systemdServiceInfo(unit string) (serviceState, error) {
 }
 func serviceAction(unit, action string) (any, error) {
 	if !safeService(unit) {
-		return nil, errors.New("service is protected or invalid")
+		return nil, errors.New("服务受保护或名称无效")
 	}
 	if action != "start" && action != "stop" && action != "restart" {
-		return nil, errors.New("unsupported service action")
+		return nil, errors.New("不支持的服务操作")
 	}
 	p := systemctlPath()
 	if p == "" {
-		return nil, errors.New("systemd not available")
+		return nil, errors.New("systemd 不可用")
 	}
 	cmd := exec.Command(p, action, unit)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("systemd %s failed", action)
+		return nil, fmt.Errorf("systemd %s 操作失败", action)
 	}
 	st, _ := systemdServiceInfo(unit)
 	return st, nil
@@ -570,10 +582,10 @@ func stopProcess(pid int, sig syscall.Signal) (any, error) {
 		return nil, err
 	}
 	if d.Protected || !d.CanTerminate {
-		return nil, errors.New("process is protected")
+		return nil, errors.New("该进程受保护")
 	}
 	if sig != syscall.SIGTERM && sig != syscall.SIGKILL {
-		return nil, errors.New("unsupported process signal")
+		return nil, errors.New("不支持的进程信号")
 	}
 	rec, can := captureRestart(pid, d)
 	if can {
@@ -581,7 +593,7 @@ func stopProcess(pid int, sig syscall.Signal) (any, error) {
 		// snapshot is safely persisted. This prevents "stopped but unrecoverable"
 		// states when the helper cannot write its recovery store.
 		if err = saveStopped(rec); err != nil {
-			return nil, fmt.Errorf("cannot save process recovery record: %w", err)
+			return nil, fmt.Errorf("无法保存进程恢复记录: %w", err)
 		}
 	}
 	if err = syscall.Kill(pid, sig); err != nil {
@@ -599,9 +611,12 @@ func stopProcess(pid int, sig syscall.Signal) (any, error) {
 			_ = removeStopped(rec.ID)
 		}
 		if sig == syscall.SIGTERM {
-			return nil, errors.New("process did not exit after SIGTERM")
+			return nil, errors.New("进程在 SIGTERM 后仍未退出")
 		}
-		return nil, errors.New("process did not exit after SIGKILL")
+		return nil, errors.New("进程在 SIGKILL 后仍未退出")
+	}
+	if isManagedUnit(d.Service) {
+		cleanupManagedRuntimeUnit(d.Service)
 	}
 	return map[string]any{"pid": pid, "signal": sig.String(), "stopped": publicRecord(rec, can), "exited": true}, nil
 }
@@ -611,19 +626,19 @@ func restartProcess(pid int) (any, error) {
 		return nil, err
 	}
 	if d.Protected || !d.CanRestart {
-		return nil, errors.New("process cannot be safely restarted")
+		return nil, errors.New("该进程无法安全重启")
 	}
 	if d.RestartMode == "systemd" {
 		return serviceAction(d.Service, "restart")
 	}
 	rec, can := captureRestart(pid, d)
 	if !can {
-		return nil, errors.New("restart snapshot unavailable")
+		return nil, errors.New("无法创建进程重启快照")
 	}
 	// Persist recovery before stopping the old process. If starting the new
 	// process fails, the user can still start it from the "stopped" list.
 	if err = saveStopped(rec); err != nil {
-		return nil, fmt.Errorf("cannot save process recovery record: %w", err)
+		return nil, fmt.Errorf("无法保存进程恢复记录: %w", err)
 	}
 	if err = syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		_ = removeStopped(rec.ID)
@@ -631,16 +646,30 @@ func restartProcess(pid int) (any, error) {
 	}
 	if !waitGone(pid, 5*time.Second) {
 		_ = removeStopped(rec.ID)
-		return nil, errors.New("process did not exit after SIGTERM; restart aborted")
+		return nil, errors.New("进程在 SIGTERM 后仍未退出，已取消重启")
 	}
 	npid, err := startRecord(rec)
 	if err != nil {
 		// Keep the saved record so the user can retry the safe start manually.
-		return nil, fmt.Errorf("process stopped but restart failed; recovery record retained: %w", err)
+		return nil, fmt.Errorf("进程已停止但重启失败，已保留恢复记录: %w", err)
 	}
 	_ = removeStopped(rec.ID)
 	return map[string]any{"old_pid": pid, "new_pid": npid, "mode": "direct"}, nil
 }
+func cleanupManagedRuntimeUnit(unit string) {
+	if !isManagedUnit(unit) {
+		return
+	}
+	if sys := systemctlPath(); sys != "" {
+		_ = exec.Command(sys, "reset-failed", unit).Run()
+	}
+	_ = os.Remove(filepath.Join("/run/systemd/system", unit))
+	_ = os.Remove(filepath.Join("/run/nodelume-agent-managed", strings.TrimSuffix(unit, ".service")+".sh"))
+	if sys := systemctlPath(); sys != "" {
+		_ = exec.Command(sys, "daemon-reload").Run()
+	}
+}
+
 func waitGone(pid int, d time.Duration) bool {
 	end := time.Now().Add(d)
 	for time.Now().Before(end) {
@@ -668,8 +697,11 @@ func processExited(pid int) bool {
 func captureRestart(pid int, d ProcessDetail) (storedRecord, bool) {
 	id := fmt.Sprintf("%d-%d", time.Now().UnixNano(), pid)
 	r := storedRecord{StoppedRecord: StoppedRecord{ID: id, Name: d.Name, Launch: d.Launch, Service: d.Service, StoppedAt: time.Now().Unix(), CanStart: d.CanRestart, Note: d.Note}}
-	if d.RestartMode == "systemd" {
+	if d.RestartMode == "systemd" && !isManagedUnit(d.Service) {
 		return r, true
+	}
+	if isManagedUnit(d.Service) {
+		r.Service = ""
 	}
 	args := readCmdline(pid)
 	if hasSensitiveRestartArgs(args) {
@@ -761,7 +793,7 @@ func publicStopped() ([]StoppedRecord, error) {
 }
 func startSaved(id string) (any, error) {
 	if id == "" || len(id) > 128 {
-		return nil, errors.New("invalid restart id")
+		return nil, errors.New("恢复记录 ID 无效")
 	}
 	x, err := loadStopped()
 	if err != nil {
@@ -772,7 +804,7 @@ func startSaved(id string) (any, error) {
 			continue
 		}
 		if !r.CanStart {
-			return nil, errors.New("record is not restartable")
+			return nil, errors.New("该恢复记录不可启动")
 		}
 		var out any
 		if r.Service != "" {
@@ -789,7 +821,7 @@ func startSaved(id string) (any, error) {
 		_ = writeStopped(x)
 		return out, nil
 	}
-	return nil, errors.New("restart record not found")
+	return nil, errors.New("未找到恢复记录")
 }
 func writeStopped(x []storedRecord) error {
 	if err := os.MkdirAll(filepath.Dir(stoppedPath), 0700); err != nil {
@@ -804,22 +836,107 @@ func writeStopped(x []storedRecord) error {
 }
 func startRecord(r storedRecord) (int, error) {
 	if r.Exe == "" || len(r.Args) == 0 {
-		return 0, errors.New("missing direct-start snapshot")
+		return 0, errors.New("缺少直接启动快照")
 	}
 	if st, err := os.Stat(r.Exe); err != nil || st.IsDir() {
-		return 0, errors.New("saved executable is unavailable")
+		return 0, errors.New("已保存的可执行文件不可用")
 	}
-	devnull, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
-	if err != nil {
+	if hasSensitiveRestartArgs(r.Args) {
+		return 0, errors.New("已保存命令包含敏感参数")
+	}
+
+	// A child started directly by the privileged helper inherits the helper's
+	// systemd cgroup. That caused recovered standalone processes to be
+	// misclassified as children of nodelume-agent-helper.service and then
+	// protected from further management. Start direct recoveries in their own
+	// transient runtime unit instead. This works with older systemd versions
+	// (including CentOS 7 / systemd 219) without relying on systemd-run flags.
+	sys := systemctlPath()
+	if sys == "" {
+		return 0, errors.New("systemd 不可用，无法安全恢复独立进程")
+	}
+	id := strings.TrimSuffix(strings.TrimSpace(r.ID), ".service")
+	id = regexp.MustCompile(`[^A-Za-z0-9_.@-]+`).ReplaceAllString(id, "-")
+	if id == "" {
+		id = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	unit := "nlm-managed-" + id + ".service"
+	if !safeService(unit) {
+		return 0, errors.New("生成的恢复服务名称无效")
+	}
+
+	runDir := "/run/nodelume-agent-managed"
+	if err := os.MkdirAll(runDir, 0755); err != nil {
 		return 0, err
 	}
-	defer devnull.Close()
-	attr := &os.ProcAttr{Dir: r.Cwd, Env: []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}, Files: []*os.File{devnull, devnull, devnull}, Sys: &syscall.SysProcAttr{Setsid: true, Credential: &syscall.Credential{Uid: r.UID, Gid: r.GID}}}
-	p, err := os.StartProcess(r.Exe, r.Args, attr)
-	if err != nil {
+	script := filepath.Join(runDir, strings.TrimSuffix(unit, ".service")+".sh")
+	var line strings.Builder
+	line.WriteString("#!/bin/sh\n")
+	if r.Cwd != "" {
+		line.WriteString("cd -- ")
+		line.WriteString(quoteShellArg(r.Cwd))
+		line.WriteString(" || exit 126\n")
+	}
+	line.WriteString("exec ")
+	// Always execute the absolute path captured from /proc/<pid>/exe. argv[0]
+	// may have been relative and may not resolve under systemd's environment.
+	line.WriteString(quoteShellArg(r.Exe))
+	for _, arg := range r.Args[1:] {
+		line.WriteByte(' ')
+		line.WriteString(quoteShellArg(arg))
+	}
+	line.WriteByte('\n')
+	if err := os.WriteFile(script, []byte(line.String()), 0700); err != nil {
 		return 0, err
 	}
-	pid := p.Pid
-	_ = p.Release()
-	return pid, nil
+	if err := os.Chown(script, int(r.UID), int(r.GID)); err != nil {
+		_ = os.Remove(script)
+		return 0, err
+	}
+
+	unitPath := filepath.Join("/run/systemd/system", unit)
+	unitText := fmt.Sprintf(`[Unit]
+Description=NodeLume recovered standalone process
+
+[Service]
+Type=simple
+User=%d
+Group=%d
+ExecStart=/bin/sh %s
+Restart=no
+StandardInput=null
+StandardOutput=null
+StandardError=null
+`, r.UID, r.GID, script)
+	if err := os.WriteFile(unitPath, []byte(unitText), 0644); err != nil {
+		_ = os.Remove(script)
+		return 0, err
+	}
+	cleanup := func() {
+		_ = os.Remove(unitPath)
+		_ = os.Remove(script)
+		_ = exec.Command(sys, "daemon-reload").Run()
+	}
+	if err := exec.Command(sys, "daemon-reload").Run(); err != nil {
+		cleanup()
+		return 0, errors.New("systemd daemon-reload 失败")
+	}
+	if err := exec.Command(sys, "start", unit).Run(); err != nil {
+		cleanup()
+		return 0, errors.New("systemd 启动恢复进程失败")
+	}
+	for i := 0; i < 20; i++ {
+		st, err := systemdServiceInfo(unit)
+		if err == nil && st.MainPID > 0 {
+			return st.MainPID, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	st, err := systemdServiceInfo(unit)
+	if err != nil || st.MainPID <= 0 {
+		_ = exec.Command(sys, "stop", unit).Run()
+		cleanup()
+		return 0, errors.New("恢复后的进程未保持运行")
+	}
+	return st.MainPID, nil
 }
